@@ -24,16 +24,16 @@ Use an HTTPS Gateway URL outside isolated local testing.
 
 ## Install from GitHub
 
-Until the first tagged release, install the current `main` branch:
+Until the first tagged release, install the current `main` branch archive:
 
 ```sh
-npm install -g github:eragon-corp/eragon-context-mcp#main
+npm install -g https://github.com/eragon-corp/eragon-context-mcp/archive/refs/heads/main.tar.gz
 ```
 
 After releases begin, pin the tag instead:
 
 ```sh
-npm install -g github:eragon-corp/eragon-context-mcp#v0.1.0
+npm install -g https://github.com/eragon-corp/eragon-context-mcp/archive/refs/tags/v0.1.0.tar.gz
 ```
 
 Verify the binary:
