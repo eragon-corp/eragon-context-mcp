@@ -19,6 +19,8 @@ present in the coding agent's environment.
 - A personal Eragon Gateway key
 - **Use my Eragon context** enabled for `memory_search`
 - **Allow Memory write-back** enabled for `memory_save`
+- At least one Claude-compatible model allowed for the key when Claude Code also
+  uses the Gateway for model traffic
 
 Use an HTTPS Gateway URL outside isolated local testing.
 
@@ -42,7 +44,7 @@ Verify the binary:
 eragon-context-mcp --help
 ```
 
-## Claude Code
+## Claude Code setup
 
 Export the same personal Gateway key and URL used for model traffic:
 
@@ -51,29 +53,81 @@ export ANTHROPIC_BASE_URL="https://<your-eragon>/gw"
 export ANTHROPIC_API_KEY="<personal-gateway-key>"
 ```
 
+Use the raw URL in the shell. Do not paste Markdown such as
+`[https://example/gw](https://example/gw)` into the variable. Make these
+variables available in every shell or launcher that starts Claude Code; the MCP
+registration intentionally does not copy the key into its configuration.
+
 Register the bridge once:
 
 ```sh
 claude mcp add --scope user eragon -- eragon-context-mcp
 ```
 
-Then restart Claude Code and check:
+Restart Claude Code and confirm that the server is registered:
 
 ```sh
 claude mcp list
 ```
 
-Example prompts:
+### Choose an allowed model
 
-```text
-Use memory_save to remember that my preferred deployment window is Friday afternoon.
+Model authorization and Memory authorization are separate. A working MCP can
+still be paired with a key that is not allowed to use Claude Code's default
+model. List the models advertised for the key:
+
+```sh
+curl -fsS "$ANTHROPIC_BASE_URL/v1/models" \
+  -H "Authorization: Bearer $ANTHROPIC_API_KEY"
 ```
 
-In a new session:
+If Claude Code reports `403 model not allowed for this gateway key`, start it
+with one of the returned Claude-compatible model IDs:
+
+```sh
+claude --model <allowed-model-id>
+```
+
+The model list is Gateway-specific and can change, so the guide does not
+hard-code a model name.
+
+### Verify search and write-back
+
+Search first without changing Memory:
 
 ```text
-Use memory_search to tell me my preferred deployment window.
+Use the Eragon memory_search tool to tell me what I worked on recently. Cite the Memory titles you used.
 ```
+
+To verify write-back, save a harmless, clearly labeled fact:
+
+```text
+Use the Eragon memory_save tool to remember that my preferred deployment window is Friday afternoon. Title it "Claude Code MCP verification".
+```
+
+Start a new Claude Code session, then retrieve it:
+
+```text
+Use the Eragon memory_search tool to find "Claude Code MCP verification" and tell me my preferred deployment window.
+```
+
+The write test creates a durable Personal General Memory entry. Delete that
+entry in Eragon afterward if it was only for verification.
+
+### Troubleshooting
+
+- `403 model not allowed for this gateway key`: select an allowed model as
+  described above. This error comes from model authorization, not the MCP.
+- `memory_search` is unavailable or denied: enable **Use my Eragon context**,
+  then restart Claude Code.
+- `memory_save` is denied: use a personal key and enable **Allow Memory
+  write-back**.
+- The MCP appears in `claude mcp list` but tool calls fail: confirm the Gateway
+  variables are present in the exact shell or launcher that started Claude
+  Code.
+- Claude Code says its built-in `claude.ai` connectors are disabled: this is
+  expected when `ANTHROPIC_API_KEY` takes precedence and is unrelated to the
+  Eragon MCP server.
 
 ## Codex
 
