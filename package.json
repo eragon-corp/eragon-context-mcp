@@ -1,0 +1,36 @@
+{
+  "name": "eragon-context-mcp",
+  "version": "0.1.0",
+  "description": "Eragon context and Memory MCP bridge for coding agents.",
+  "type": "module",
+  "bin": {
+    "eragon-context-mcp": "./bin/eragon-context-mcp.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.7"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eragon-corp/eragon-context-mcp.git"
+  }
+}
