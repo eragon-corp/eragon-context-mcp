@@ -77,12 +77,36 @@ Use memory_search to tell me my preferred deployment window.
 
 ## Codex
 
-Codex can use the same stdio bridge:
+Codex starts MCP servers with a filtered environment. It forwards only the
+variables an entry lists in `env_vars`, so `codex mcp add` alone leaves the
+bridge without a key and Codex shows no memory tools. Write the entry
+yourself, with the URL as an argument and the key forwarded by name:
 
 ```sh
-export ERAGON_GATEWAY_URL="https://<your-eragon>/gw"
 export ERAGON_API_KEY="<personal-gateway-key>"
-codex mcp add eragon -- eragon-context-mcp
+
+codex mcp remove eragon >/dev/null 2>&1
+mkdir -p "${CODEX_HOME:-$HOME/.codex}"
+cat >> "${CODEX_HOME:-$HOME/.codex}/config.toml" <<'EOF'
+
+[mcp_servers.eragon]
+command = "eragon-context-mcp"
+args = ["--url", "https://<your-eragon>/gw"]
+env_vars = ["ERAGON_API_KEY"]
+EOF
+codex mcp get eragon
+```
+
+`codex mcp get eragon` should show `env: ERAGON_API_KEY=*****`. The key stays
+in your shell and is never written to `config.toml`. Removing the old entry
+first keeps a re-run from adding a second `[mcp_servers.eragon]` table, which
+Codex would refuse to load.
+
+`codex exec` runs without a person to approve tool calls and cancels any
+that need approval. For headless runs, approve the Eragon tools for that run:
+
+```sh
+codex exec -c 'mcp_servers.eragon.default_tools_approval_mode="approve"' "<prompt>"
 ```
 
 ## Configuration
