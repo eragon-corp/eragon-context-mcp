@@ -7,7 +7,12 @@ The bridge exposes exactly two tools:
 
 - `memory_search` searches permission-filtered General Memory.
 - `memory_save` writes durable facts, preferences, procedures, or contacts to
-  the key owner's **Personal Memory in General**.
+  the key owner's **Personal Memory in General**, or corrects one of the key
+  owner's own entries when given its `memory_id`.
+
+The agent needs no memory instructions in CLAUDE.md or AGENTS.md. The bridge
+tells it when to search and save as it connects, and the Gateway adds the same
+guidance to every model call.
 
 It cannot write Team, Organization, Knowledge, or Project data. It never stores
 the Gateway key in MCP configuration; the child process reads the key already
@@ -42,13 +47,40 @@ Verify the binary:
 eragon-context-mcp --help
 ```
 
+## Set up every agent at once
+
+After installing, run:
+
+```sh
+eragon-context-mcp install --url https://<your-eragon>/gw --model <model-id>
+```
+
+It finds Claude Code, Codex, Pi and OpenCode on your PATH and registers the
+bridge with each, the way each was tested:
+
+| Agent | What it writes |
+|---|---|
+| Claude Code | `claude mcp add --scope user eragon -- eragon-context-mcp` |
+| Codex | `[mcp_servers.eragon]` in `config.toml`, with `env_vars = ["ERAGON_API_KEY"]` |
+| Pi | `mcp.json` with `exposure: "direct"`, and an `eragon` provider in `models.json` when `--model` is given |
+| OpenCode | the bridge in `opencode.json`, and an `eragon` provider when `--model` is given |
+
+Name agents with `--agent` (repeatable) to skip detection, and add
+`--dry-run` to see what it would change. It never writes the Gateway key:
+Claude Code reads `ANTHROPIC_AUTH_TOKEN`, the others `ERAGON_API_KEY`, from
+the environment they start in. A file it changes is kept beside itself as
+`<file>.eragon-backup`.
+
+The sections below are the same setup by hand.
+
 ## Claude Code
 
-Export the same personal Gateway key and URL used for model traffic:
+The bridge reads the Gateway URL and key Claude Code already uses for model
+traffic, as the Gateway Connect page sets them:
 
 ```sh
 export ANTHROPIC_BASE_URL="https://<your-eragon>/gw"
-export ANTHROPIC_API_KEY="<personal-gateway-key>"
+export ANTHROPIC_AUTH_TOKEN="<personal-gateway-key>"
 ```
 
 Register the bridge once:
@@ -63,16 +95,16 @@ Then restart Claude Code and check:
 claude mcp list
 ```
 
-Example prompts:
+Try it without naming a tool:
 
 ```text
-Use memory_save to remember that my preferred deployment window is Friday afternoon.
+I always deploy on Friday afternoons.
 ```
 
 In a new session:
 
 ```text
-Use memory_search to tell me my preferred deployment window.
+When should I schedule the deploy?
 ```
 
 ## Codex
@@ -121,9 +153,12 @@ The key is resolved in this order:
 
 1. `ERAGON_API_KEY`
 2. `ANTHROPIC_API_KEY`
+3. `ANTHROPIC_AUTH_TOKEN`
 
-You can therefore keep model and Memory traffic on the same personal Gateway
-credential without copying the secret into an MCP configuration file.
+When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
+`ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,
+or else `ANTHROPIC_AUTH_TOKEN`). A stale `ERAGON_API_KEY` would otherwise save
+Memory under another key than the model calls use.
 
 ## Development
 

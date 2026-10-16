@@ -6,7 +6,7 @@ export const MEMORY_TOOLS: Tool[] = [
   {
     name: "memory_search",
     description:
-      "Search Eragon Memory visible to this user in General. Use before saving when durable Memory may already answer or conflict.",
+      "Search the user's Eragon Memory: their own General memories and the team, workspace, and shared ones they can see. Call it when the task depends on the user's preferences, people, past decisions, or how their systems work. Each result has an id; pass one of the user's own as memory_id to memory_save to correct it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -20,7 +20,10 @@ export const MEMORY_TOOLS: Tool[] = [
   {
     name: "memory_save",
     description:
-      "Save an explicit durable fact, preference, procedure, or contact to Personal General Memory. Never save secrets, guesses, transcripts, transient task state, or project-specific details.",
+      "Save a lasting fact, preference, procedure, or contact to the user's personal General Memory, which Eragon and their other coding agents read. Call it without being asked when the user states or corrects one. To correct one of the user's own memories, pass its id as memory_id; a team, workspace, or shared memory cannot be corrected this way, so save the correction as a new memory. A correction's result shows the words it replaced. A save may combine what the user said with what Memory already holds; never add details from neither, and never save secrets, transcripts, or the current task's temporary state. " +
+      // The same words Eragon's own agents are told (the runtime's reflection prompt).
+      "Private matters of anyone other than the user (health or medical treatment, pregnancy, family, personal legal trouble, an employee's or candidate's pay, job performance) are never memories. Keep only what they change about the work (who is away, until when, who covers, what to do differently), never the reason. Rates, prices, pay bands and policies are business facts, not private matters. " +
+      "If you are asked to save someone else's private matter, save what it changes about the work and tell the user what you left out.",
     inputSchema: {
       type: "object",
       properties: {
@@ -30,6 +33,10 @@ export const MEMORY_TOOLS: Tool[] = [
         idempotency_key: {
           type: "string",
           description: "Optional stable key reused when retrying the same logical save.",
+        },
+        memory_id: {
+          type: "string",
+          description: "Optional id of the user's own memory that this save corrects, from memory_search or the injected Memory context.",
         },
       },
       required: ["kind", "title", "content"],
@@ -95,6 +102,10 @@ export async function callMemoryTool(
     if (suppliedKey !== undefined && !nonEmpty(suppliedKey)) {
       return errorResult("memory_save idempotency_key must be a non-empty string");
     }
+    const memoryId = args.memory_id;
+    if (memoryId !== undefined && !nonEmpty(memoryId)) {
+      return errorResult("memory_save memory_id must be a non-empty string");
+    }
     path = "/v1/memory";
     body = {
       kind: args.kind,
@@ -103,6 +114,7 @@ export async function callMemoryTool(
       idempotencyKey: suppliedKey ?? fallbackIdempotencyKey,
     };
     if (body.idempotencyKey === undefined) delete body.idempotencyKey;
+    if (memoryId !== undefined) body.memoryId = memoryId.trim();
   } else {
     return errorResult(`Unknown Eragon Memory tool: ${name}`);
   }

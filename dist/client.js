@@ -1,3 +1,4 @@
+import { VERSION } from "./version.js";
 export async function requestGateway({ gatewayUrl, token, path, body, fetchImpl = fetch, }) {
     const base = gatewayUrl.replace(/\/+$/, "");
     const response = await fetchImpl(`${base}${path}`, {
@@ -6,6 +7,7 @@ export async function requestGateway({ gatewayUrl, token, path, body, fetchImpl 
             accept: "application/json",
             authorization: `Bearer ${token}`,
             "content-type": "application/json",
+            "user-agent": `eragon-context-mcp/${VERSION}`,
         },
         body: JSON.stringify(body),
         redirect: "manual",

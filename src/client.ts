@@ -1,3 +1,5 @@
+import { VERSION } from "./version.js";
+
 export type GatewayResponse = {
   status: number;
   body: unknown;
@@ -25,6 +27,7 @@ export async function requestGateway({
       accept: "application/json",
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      "user-agent": `eragon-context-mcp/${VERSION}`,
     },
     body: JSON.stringify(body),
     redirect: "manual",
