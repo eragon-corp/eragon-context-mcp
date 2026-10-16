@@ -11,6 +11,7 @@
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
 export const AGENTS = ["claude-code", "codex", "pi", "opencode"];
@@ -156,16 +157,24 @@ export function opencodeConfig(current, gatewayUrl, model) {
         },
     });
 }
+/** Windows installs a CLI as `<name>.cmd` (npm) or `<name>.exe`, found through PATHEXT. */
+function candidates(binary, env) {
+    if (process.platform !== "win32")
+        return [binary];
+    return [binary, ...(env.PATHEXT ?? ".EXE;.CMD").split(";").filter(Boolean).map((ext) => `${binary}${ext.toLowerCase()}`)];
+}
 async function onPath(binary, env) {
-    for (const dir of (env.PATH ?? "").split(delimiter)) {
+    for (const dir of (env.PATH ?? env.Path ?? "").split(delimiter)) {
         if (dir === "")
             continue;
-        try {
-            await access(join(dir, binary), constants.X_OK);
-            return true;
-        }
-        catch {
-            // Not in this directory.
+        for (const name of candidates(binary, env)) {
+            try {
+                await access(join(dir, name), constants.X_OK);
+                return true;
+            }
+            catch {
+                // Not here.
+            }
         }
     }
     return false;
@@ -195,7 +204,8 @@ async function writeConfig(file, current, next) {
 }
 const run = promisify(execFile);
 function plan(agent, gatewayUrl, model, env) {
-    const home = env.HOME ?? "";
+    // Windows has no HOME; its agents keep their config under the profile directory.
+    const home = env.HOME ?? env.USERPROFILE ?? homedir();
     const missingKey = env[KEY_VARIABLE] === undefined
         ? [`Export ${KEY_VARIABLE}=<your personal Gateway key> in the shell you start it from.`]
         : [];
@@ -271,7 +281,8 @@ export async function install(options) {
             }
             for (const [command, ...args] of steps.commands) {
                 try {
-                    await run(command ?? "", args, { env: options.env });
+                    // A `.cmd` shim runs only through a shell on Windows.
+                    await run(command ?? "", args, { env: options.env, shell: process.platform === "win32" });
                 }
                 catch (error) {
                     // `mcp remove` fails when nothing is registered yet; that is the
