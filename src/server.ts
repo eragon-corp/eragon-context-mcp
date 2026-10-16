@@ -22,8 +22,8 @@ export function fallbackIdempotencyKey(
 export const MEMORY_INSTRUCTIONS = [
   "Eragon Memory is the long-term memory this user shares between Eragon and their coding agents.",
   "Call memory_search when the task depends on the user's preferences, people, past decisions, or how their systems work, and what you already have does not settle it.",
-  "Call memory_save without being asked when the user states a lasting fact, preference, procedure, or contact, or corrects one. To correct one of the user's own memories, pass its id as memory_id.",
-  "Never save secrets, guesses, or the current task's temporary state. If memory_save says this key cannot write Eragon Memory, stop calling it.",
+  "Call memory_save without being asked when the user states a lasting fact, preference, procedure, or contact, or corrects one. To correct one of the user's own memories, pass its id from memory_search or from the Memory context as memory_id.",
+  "Never save secrets, guesses, details the user did not give, or the current task's temporary state. If memory_save says this key cannot write Eragon Memory, stop calling it.",
 ].join("\n");
 
 export function createMemoryMcpServer(config: MemoryToolConfig): Server {
