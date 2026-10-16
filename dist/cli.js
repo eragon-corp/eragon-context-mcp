@@ -6,7 +6,7 @@ Usage:
 
 Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
-  ERAGON_API_KEY     or ANTHROPIC_API_KEY
+  ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
 
 The server exposes exactly two stdio MCP tools: memory_search and memory_save.`;
 function explicitUrl(argv) {
@@ -21,7 +21,22 @@ function explicitUrl(argv) {
 }
 export function resolveConfig(argv, environment = process.env) {
     const gatewayUrl = explicitUrl(argv) ?? environment.ERAGON_GATEWAY_URL ?? environment.ANTHROPIC_BASE_URL;
-    const token = environment.ERAGON_API_KEY ?? environment.ANTHROPIC_API_KEY;
+    // Claude Code sends ANTHROPIC_API_KEY when both are set.
+    const modelKey = environment.ANTHROPIC_API_KEY ?? environment.ANTHROPIC_AUTH_TOKEN;
+    // A Memory key that differs from the key model calls go out under files the
+    // agent's saves under another person or workspace, with nothing to show it:
+    // a stale ERAGON_API_KEY left in a shell profile after the model key was
+    // replaced did exactly that. Only a gateway base URL makes the two comparable.
+    if (environment.ANTHROPIC_BASE_URL !== undefined &&
+        environment.ERAGON_API_KEY !== undefined &&
+        modelKey !== undefined &&
+        environment.ERAGON_API_KEY !== modelKey) {
+        return {
+            ok: false,
+            error: "ERAGON_API_KEY is not the key your model calls use, so Memory would be saved under a different key. Unset ERAGON_API_KEY, or set it to the same Gateway key.",
+        };
+    }
+    const token = environment.ERAGON_API_KEY ?? modelKey;
     if (gatewayUrl === undefined || gatewayUrl.trim() === "") {
         return {
             ok: false,
@@ -31,7 +46,7 @@ export function resolveConfig(argv, environment = process.env) {
     if (token === undefined || token.trim() === "") {
         return {
             ok: false,
-            error: "Set ERAGON_API_KEY or ANTHROPIC_API_KEY to a personal Gateway key.",
+            error: "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN to a personal Gateway key.",
         };
     }
     let parsed;

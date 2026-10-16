@@ -159,3 +159,48 @@ describe("memory_save", () => {
     expect(JSON.stringify(result)).not.toContain("never-print-me");
   });
 });
+
+describe("memory_save corrections", () => {
+  const ok = () =>
+    vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ memory: { id: "mem_old", outcome: "updated" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+  it("sends memory_id as the entry to correct", async () => {
+    const fetchImpl = ok();
+    await callMemoryTool(
+      "memory_save",
+      { kind: "fact", title: "Deploy day", content: "Deploys are on Friday.", memory_id: " mem_old " },
+      { gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret", fetchImpl },
+      "mcp:session:request",
+    );
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://s.eragon.ai/gw/v1/memory",
+      expect.objectContaining({
+        body: JSON.stringify({
+          kind: "fact",
+          title: "Deploy day",
+          content: "Deploys are on Friday.",
+          idempotencyKey: "mcp:session:request",
+          memoryId: "mem_old",
+        }),
+      }),
+    );
+  });
+
+  it("rejects an empty memory_id without calling the Gateway", async () => {
+    const fetchImpl = ok();
+    const result = await callMemoryTool(
+      "memory_save",
+      { kind: "fact", title: "Deploy day", content: "Deploys are on Friday.", memory_id: " " },
+      { gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret", fetchImpl },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
