@@ -31,6 +31,7 @@ describe("memory MCP server", () => {
 
     expect(save?.inputSchema.properties).toHaveProperty("memory_id");
     expect(save?.inputSchema.required).toEqual(["kind", "title", "content"]);
+    expect(save?.description).toContain("Private matters of anyone other than the user");
     await client.close();
   });
 });
