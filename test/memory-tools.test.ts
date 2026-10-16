@@ -51,6 +51,8 @@ describe("memory_search", () => {
         headers: expect.objectContaining({
           authorization: "Bearer test-secret",
           "content-type": "application/json",
+          // The Gateway counts the bridge's Memory calls under this name.
+          "user-agent": expect.stringMatching(/^eragon-context-mcp\/\d+\.\d+\.\d+$/),
         }),
         body: JSON.stringify({ query: "deploy window", limit: 4 }),
       }),

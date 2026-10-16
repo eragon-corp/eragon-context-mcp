@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 import { callMemoryTool, MEMORY_TOOLS, type MemoryToolConfig } from "./memory-tools.js";
+import { VERSION } from "./version.js";
 
 export function fallbackIdempotencyKey(
   sessionId: string,
@@ -29,7 +30,7 @@ export const MEMORY_INSTRUCTIONS = [
 export function createMemoryMcpServer(config: MemoryToolConfig): Server {
   const sessionId = randomUUID();
   const server = new Server(
-    { name: "eragon-context", version: "0.2.0" },
+    { name: "eragon-context", version: VERSION },
     { capabilities: { tools: {} }, instructions: MEMORY_INSTRUCTIONS },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MEMORY_TOOLS }));
