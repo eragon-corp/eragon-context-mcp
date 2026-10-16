@@ -206,3 +206,63 @@ describe("memory_save corrections", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe("memory_share", () => {
+  const config = (fetchImpl: typeof fetch) => ({ gatewayUrl: "https://tenant.example/gw", token: "test-secret", fetchImpl });
+
+  it("files a share for the user's approval and says where to approve it", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      expect(String(input)).toBe("https://tenant.example/gw/v1/memory/share");
+      expect(JSON.parse(String(init?.body))).toEqual({ memoryIds: ["mem_1"], audience: "team", team: "Platform" });
+      return new Response(JSON.stringify({
+        approval: { id: "gwa_1", status: "pending", description: "Share 1 memory with the Platform team", expiresAt: "2026-10-17T08:00:00.000Z", reviewPath: "/inbox" },
+      }), { status: 202, headers: { "content-type": "application/json" } });
+    });
+
+    const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], audience: "team", team: "Platform" }, config(fetchImpl));
+
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]).toEqual({
+      type: "text",
+      text: "Nothing is shared yet. Sent to the user for approval: Share 1 memory with the Platform team. Tell them to approve or deny it in their Eragon Inbox at https://tenant.example/inbox before 2026-10-17T08:00:00.000Z. Approval id: gwa_1.",
+    });
+  });
+
+  it("hands back the gateway's question when a name is ambiguous", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ ask: "More than one colleague matches Al." }), {
+      status: 200, headers: { "content-type": "application/json" },
+    }));
+    const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], recipients: ["Al"] }, config(fetchImpl));
+    expect(result.content[0]).toEqual({ type: "text", text: "More than one colleague matches Al." });
+  });
+
+  it("needs memory ids and exactly one of recipients and audience before calling the gateway", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    for (const args of [
+      { memory_ids: [], audience: "org" },
+      { memory_ids: ["mem_1"] },
+      { memory_ids: ["mem_1"], recipients: ["a"], audience: "org" },
+      { memory_ids: ["mem_1"], audience: "everyone" },
+      { memory_ids: ["mem_1"], recipients: ["a"], team: "Platform" },
+    ]) {
+      expect((await callMemoryTool("memory_share", args, config(fetchImpl))).isError).toBe(true);
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("passes on the gateway's refusal", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: { message: "this gateway key cannot write Eragon Memory" } }), {
+      status: 403, headers: { "content-type": "application/json" },
+    }));
+    const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], audience: "org" }, config(fetchImpl));
+    expect(result).toEqual({ isError: true, content: [{ type: "text", text: "this gateway key cannot write Eragon Memory" }] });
+  });
+
+  it("never sends the user to look for a share the gateway did not file", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200, headers: { "content-type": "application/json" },
+    }));
+    const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], audience: "org" }, { gatewayUrl: "https://tenant.example/gw", token: "test-secret", fetchImpl });
+    expect(result).toEqual({ isError: true, content: [{ type: "text", text: "Eragon did not file this share; nothing was shared or sent for approval." }] });
+  });
+});
