@@ -47,6 +47,32 @@ Verify the binary:
 eragon-context-mcp --help
 ```
 
+## Set up every agent at once
+
+After installing, run:
+
+```sh
+eragon-context-mcp install --url https://<your-eragon>/gw --model <model-id>
+```
+
+It finds Claude Code, Codex, Pi and OpenCode on your PATH and registers the
+bridge with each, the way each was tested:
+
+| Agent | What it writes |
+|---|---|
+| Claude Code | `claude mcp add --scope user eragon -- eragon-context-mcp` |
+| Codex | `[mcp_servers.eragon]` in `config.toml`, with `env_vars = ["ERAGON_API_KEY"]` |
+| Pi | `mcp.json` with `exposure: "direct"`, and an `eragon` provider in `models.json` when `--model` is given |
+| OpenCode | the bridge in `opencode.json`, and an `eragon` provider when `--model` is given |
+
+Name agents with `--agent` (repeatable) to skip detection, and add
+`--dry-run` to see what it would change. It never writes the Gateway key:
+Claude Code reads `ANTHROPIC_AUTH_TOKEN`, the others `ERAGON_API_KEY`, from
+the environment they start in. A file it changes is kept beside itself as
+`<file>.eragon-backup`.
+
+The sections below are the same setup by hand.
+
 ## Claude Code
 
 The bridge reads the Gateway URL and key Claude Code already uses for model

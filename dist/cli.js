@@ -1,8 +1,14 @@
+import { AGENTS, install } from "./install.js";
 import { runMemoryMcp } from "./server.js";
 const USAGE = `eragon-context-mcp — Eragon Memory for coding agents
 
 Usage:
   eragon-context-mcp [--url https://<your-eragon>/gw]
+  eragon-context-mcp install [--agent claude-code|codex|pi|opencode]... [--url URL] [--model ID] [--dry-run]
+
+install registers this bridge with each coding agent on PATH (or each --agent
+named), and for pi and opencode adds an Eragon model provider when --model is
+given. It never writes the Gateway key: each agent reads it from its environment.
 
 Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
@@ -61,11 +67,61 @@ export function resolveConfig(argv, environment = process.env) {
     }
     return { ok: true, gatewayUrl: gatewayUrl.replace(/\/+$/, ""), token };
 }
+function values(argv, flag) {
+    const found = [];
+    for (let index = 0; index < argv.length; index += 1) {
+        const argument = argv[index];
+        if (argument === flag && argv[index + 1] !== undefined)
+            found.push(argv[index + 1] ?? "");
+        else if (argument?.startsWith(`${flag}=`))
+            found.push(argument.slice(flag.length + 1));
+    }
+    return found;
+}
+const isAgent = (value) => AGENTS.includes(value);
+async function runInstall(argv, environment) {
+    const named = values(argv, "--agent");
+    const unknown = named.filter((agent) => !isAgent(agent));
+    if (unknown.length > 0) {
+        console.error(`Unknown agent ${unknown.join(", ")}. Use one of: ${AGENTS.join(", ")}.`);
+        return 1;
+    }
+    const gatewayUrl = (explicitUrl(argv) ?? environment.ERAGON_GATEWAY_URL ?? environment.ANTHROPIC_BASE_URL)?.replace(/\/+$/, "");
+    if (gatewayUrl === undefined || gatewayUrl === "") {
+        console.error("Pass --url https://<your-eragon>/gw.");
+        return 1;
+    }
+    const dryRun = argv.includes("--dry-run");
+    const reports = await install({
+        agents: named.length === 0 ? "detect" : named.filter(isAgent),
+        gatewayUrl,
+        model: values(argv, "--model")[0],
+        env: environment,
+        dryRun,
+    });
+    if (reports.length === 0) {
+        console.log(`No coding agent found on PATH (looked for ${AGENTS.join(", ")}). Name one with --agent.`);
+        return 1;
+    }
+    for (const report of reports) {
+        console.log(`${report.agent}: ${dryRun ? "would configure" : "configured"}`);
+        for (const file of report.files)
+            console.log(`  wrote ${file}`);
+        for (const command of report.commands)
+            console.log(`  ran ${command}`);
+        for (const note of report.notes)
+            console.log(`  next: ${note}`);
+    }
+    console.log("Start a new agent session to load the Eragon Memory tools.");
+    return 0;
+}
 export async function main(argv = process.argv.slice(2)) {
     if (argv.includes("--help") || argv.includes("-h")) {
         console.log(USAGE);
         return 0;
     }
+    if (argv[0] === "install")
+        return runInstall(argv.slice(1), process.env);
     const config = resolveConfig(argv);
     if (!config.ok) {
         console.error(config.error);
