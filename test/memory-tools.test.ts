@@ -257,5 +257,12 @@ describe("memory_share", () => {
     const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], audience: "org" }, config(fetchImpl));
     expect(result).toEqual({ isError: true, content: [{ type: "text", text: "this gateway key cannot write Eragon Memory" }] });
   });
-});
 
+  it("never sends the user to look for a share the gateway did not file", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200, headers: { "content-type": "application/json" },
+    }));
+    const result = await callMemoryTool("memory_share", { memory_ids: ["mem_1"], audience: "org" }, { gatewayUrl: "https://tenant.example/gw", token: "test-secret", fetchImpl });
+    expect(result).toEqual({ isError: true, content: [{ type: "text", text: "Eragon did not file this share; nothing was shared or sent for approval." }] });
+  });
+});

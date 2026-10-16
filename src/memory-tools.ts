@@ -86,6 +86,10 @@ function shareResult(body: unknown, gatewayUrl: string): CallToolResult {
   const answer = body !== null && typeof body === "object" ? body : {};
   if ("ask" in answer && typeof answer.ask === "string") return plainResult(answer.ask);
   const approval = "approval" in answer && answer.approval !== null && typeof answer.approval === "object" ? answer.approval : {};
+  // Only a filed request is waiting anywhere; anything else must not send the user to look for one.
+  if (!("id" in approval) || typeof approval.id !== "string" || approval.id === "") {
+    return { isError: true, content: [{ type: "text", text: "Eragon did not file this share; nothing was shared or sent for approval." }] };
+  }
   const field = (key: string) => (key in approval ? String(Reflect.get(approval, key)) : "");
   const inbox = new URL(field("reviewPath") || "/inbox", new URL(gatewayUrl).origin).toString();
   return plainResult(
