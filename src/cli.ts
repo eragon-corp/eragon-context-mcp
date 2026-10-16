@@ -15,7 +15,7 @@ Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
   ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
 
-The server exposes exactly two stdio MCP tools: memory_search and memory_save.`;
+The server exposes exactly three stdio MCP tools: memory_search, memory_save and memory_share.`;
 
 type ConfigEnvironment = Partial<
   Record<

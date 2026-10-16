@@ -21,6 +21,14 @@ describe("memory MCP server", () => {
     expect(instructions).toContain("memory_save");
     expect(instructions).toContain("without being asked");
     expect(instructions).toContain("memory_id");
+    expect(instructions).toContain("Nothing is shared until the user approves it in their Eragon Inbox");
+    await client.close();
+  });
+
+  it("offers exactly the three Memory tools", async () => {
+    const client = await connected();
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(["memory_search", "memory_save", "memory_share"]);
     await client.close();
   });
 

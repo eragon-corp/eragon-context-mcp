@@ -3,18 +3,23 @@
 Connect coding agents to the key owner's Eragon Memory through a narrow local
 MCP bridge.
 
-The bridge exposes exactly two tools:
+The bridge exposes exactly three tools:
 
 - `memory_search` searches permission-filtered General Memory.
 - `memory_save` writes durable facts, preferences, procedures, or contacts to
   the key owner's **Personal Memory in General**, or corrects one of the key
   owner's own entries when given its `memory_id`.
+- `memory_share` asks to share selected memories with named colleagues, the
+  key owner's team, or the whole workspace. It shares nothing itself: the
+  request waits in the key owner's Eragon Inbox, and the memories are shared
+  only when they approve it there.
 
 The agent needs no memory instructions in CLAUDE.md or AGENTS.md. The bridge
 tells it when to search and save as it connects, and the Gateway adds the same
 guidance to every model call.
 
-It cannot write Team, Organization, Knowledge, or Project data. It never stores
+It cannot write Team, Organization, Knowledge, or Project data. A memory reaches
+a team or the workspace only when the key owner approves a share in Eragon. It never stores
 the Gateway key in MCP configuration; the child process reads the key already
 present in the coding agent's environment.
 
@@ -23,7 +28,7 @@ present in the coding agent's environment.
 - Node.js 22.19 or newer
 - A personal Eragon Gateway key
 - **Use my Eragon context** enabled for `memory_search`
-- **Allow Memory write-back** enabled for `memory_save`
+- **Allow Memory write-back** enabled for `memory_save` and `memory_share`
 
 Use an HTTPS Gateway URL outside isolated local testing.
 

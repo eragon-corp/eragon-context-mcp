@@ -1,6 +1,6 @@
 {
   "name": "eragon-context-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Eragon context and Memory MCP bridge for coding agents.",
   "type": "module",
   "bin": {
