@@ -1,15 +1,19 @@
-import { AGENTS, install, type Agent } from "./install.js";
-import { runMemoryMcp } from "./server.js";
+import { AGENTS, install, uninstallRecallHooks, type Agent } from "./install.js";
+import { recallTimeLeft, runRecallHook } from "./recall-hook.js";
 
 const USAGE = `eragon-context-mcp — Eragon Memory for coding agents
 
 Usage:
   eragon-context-mcp [--url https://<your-eragon>/gw]
-  eragon-context-mcp install [--agent claude-code|codex|pi|opencode]... [--url URL] [--model ID] [--dry-run]
+  eragon-context-mcp install [--agent claude|claude-code|codex|pi|opencode]... [--url URL] [--model ID] [--dry-run]
+  eragon-context-mcp uninstall [--agent claude|claude-code|codex]... [--dry-run]
+  eragon-context-mcp recall-hook [--url URL]
 
 install registers this bridge with each coding agent on PATH (or each --agent
-named), and for pi and opencode adds an Eragon model provider when --model is
-given. It never writes the Gateway key: each agent reads it from its environment.
+named). It installs memory recall hooks for Claude Code and Codex, and adds an
+Eragon model provider for pi and opencode when --model is given. Each agent reads
+the Gateway key from its environment.
+uninstall removes the managed recall hooks. With no --agent it checks both clients.
 
 Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
@@ -102,8 +106,12 @@ function values(argv: string[], flag: string): string[] {
 
 const isAgent = (value: string): value is Agent => (AGENTS as readonly string[]).includes(value);
 
+function namedAgents(argv: string[]): string[] {
+  return values(argv, "--agent").map((agent) => agent === "claude" ? "claude-code" : agent);
+}
+
 async function runInstall(argv: string[], environment: NodeJS.ProcessEnv): Promise<number> {
-  const named = values(argv, "--agent");
+  const named = namedAgents(argv);
   const unknown = named.filter((agent) => !isAgent(agent));
   if (unknown.length > 0) {
     console.error(`Unknown agent ${unknown.join(", ")}. Use one of: ${AGENTS.join(", ")}.`);
@@ -127,13 +135,33 @@ async function runInstall(argv: string[], environment: NodeJS.ProcessEnv): Promi
     return 1;
   }
   for (const report of reports) {
+    if (report.error !== undefined) {
+      console.error(`${report.agent}: not configured. ${report.error}`);
+      continue;
+    }
     console.log(`${report.agent}: ${dryRun ? "would configure" : "configured"}`);
     for (const file of report.files) console.log(`  wrote ${file}`);
     for (const command of report.commands) console.log(`  ran ${command}`);
     for (const note of report.notes) console.log(`  next: ${note}`);
   }
-  console.log("Start a new agent session to load the Eragon Memory tools.");
-  return 0;
+  if (reports.some((report) => report.error === undefined)) {
+    console.log("Start a new agent session to load the Eragon Memory tools.");
+  }
+  return reports.some((report) => report.error !== undefined) ? 1 : 0;
+}
+
+async function runUninstall(argv: string[], environment: NodeJS.ProcessEnv): Promise<number> {
+  const agents = namedAgents(argv);
+  const supported = (agent: string): agent is Agent => agent === "claude-code" || agent === "codex";
+  if (!agents.every(supported)) {
+    console.error("Choose --agent claude (or claude-code) or --agent codex to uninstall a recall hook.");
+    return 1;
+  }
+  const dryRun = argv.includes("--dry-run");
+  const { files, errors } = await uninstallRecallHooks(agents.length > 0 ? agents : ["claude-code", "codex"], environment, dryRun);
+  for (const file of files) console.log(`${dryRun ? "Would remove" : "Removed"} Eragon recall hook from ${file}`);
+  for (const error of errors) console.error(`Left unchanged: ${error}`);
+  return errors.length > 0 ? 1 : 0;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -142,11 +170,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (argv[0] === "install") return runInstall(argv.slice(1), process.env);
+  if (argv[0] === "uninstall") return runUninstall(argv.slice(1), process.env);
+  if (argv[0] === "recall-hook") {
+    // Nothing left open may keep the hook alive past its deadline: the client
+    // would report the timeout as an error on every prompt.
+    setTimeout(() => process.exit(0), recallTimeLeft() + 100).unref();
+    const config = resolveConfig(argv.slice(1));
+    if (config.ok) await runRecallHook(config);
+    return 0;
+  }
   const config = resolveConfig(argv);
   if (!config.ok) {
     console.error(config.error);
     return 1;
   }
+  const { runMemoryMcp } = await import("./server.js");
   await runMemoryMcp(config);
   return 0;
 }

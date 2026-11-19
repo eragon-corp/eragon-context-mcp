@@ -9,11 +9,14 @@
  * changes is first copied beside itself as `<file>.eragon-backup`.
  */
 import { execFile } from "node:child_process";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, lstat, mkdir, readFile, readlink, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { RECALL_EVENT, RECALL_TIMEOUT_SECONDS } from "./recall-hook.js";
 
 export const AGENTS = ["claude-code", "codex", "pi", "opencode"] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -30,6 +33,8 @@ const SERVER = "eragon";
 const COMMAND = "eragon-context-mcp";
 const KEY_VARIABLE = "ERAGON_API_KEY";
 const BACKUP_SUFFIX = ".eragon-backup";
+const RECALL_STATUS = "Recalling Eragon Memory (eragon-context-mcp)";
+const BRIDGE_BIN = fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url));
 
 type JsonObject = Record<string, unknown>;
 
@@ -39,7 +44,12 @@ function isObject(value: unknown): value is JsonObject {
 
 function parseObject(current: string | undefined, file: string): JsonObject {
   if (current === undefined || current.trim() === "") return {};
-  const parsed: unknown = JSON.parse(current);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(current.replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error(`${file} is not valid JSON (${error instanceof Error ? error.message : String(error)}). Fix or move it, then run this again.`);
+  }
   if (!isObject(parsed)) throw new Error(`${file} is not a JSON object`);
   return parsed;
 }
@@ -182,6 +192,8 @@ export type InstallReport = {
   commands: string[];
   /** What the person still has to do or know. */
   notes: string[];
+  /** Why this agent was skipped or left partly configured; the other agents are still configured. */
+  error?: string;
 };
 
 /** Windows installs a CLI as `<name>.cmd` (npm) or `<name>.exe`, found through PATHEXT. */
@@ -190,19 +202,40 @@ function candidates(binary: string, env: InstallEnvironment): string[] {
   return [binary, ...(env.PATHEXT ?? ".EXE;.CMD").split(";").filter(Boolean).map((ext) => `${binary}${ext.toLowerCase()}`)];
 }
 
-async function onPath(binary: string, env: InstallEnvironment): Promise<boolean> {
+/** The first executable named `binary` on PATH, as written there. */
+async function findOnPath(binary: string, env: InstallEnvironment): Promise<string | undefined> {
   for (const dir of (env.PATH ?? env.Path ?? "").split(delimiter)) {
     if (dir === "") continue;
     for (const name of candidates(binary, env)) {
       try {
         await access(join(dir, name), constants.X_OK);
-        return true;
+        return join(dir, name);
       } catch {
         // Not here.
       }
     }
   }
-  return false;
+  return undefined;
+}
+
+async function onPath(binary: string, env: InstallEnvironment): Promise<boolean> {
+  return (await findOnPath(binary, env)) !== undefined;
+}
+
+/**
+ * Whether `eragon-context-mcp` on PATH is this very binary, as after `npm
+ * install -g`. Then the hook calls it by name, like the MCP registration, and
+ * keeps working when the package moves with a Node upgrade. Another copy on
+ * PATH may be an older version without `recall-hook`, so it is not used.
+ */
+async function bridgeOnPath(env: InstallEnvironment): Promise<boolean> {
+  const found = await findOnPath(COMMAND, env);
+  if (found === undefined) return false;
+  try {
+    return (await realpath(found)) === (await realpath(BRIDGE_BIN));
+  } catch {
+    return false;
+  }
 }
 
 async function readOptional(file: string): Promise<string | undefined> {
@@ -215,16 +248,206 @@ async function readOptional(file: string): Promise<string | undefined> {
 }
 
 /**
- * Writes `next` to `file` through a temporary file and a rename, so an agent
- * starting meanwhile never reads half a config; the previous contents are
- * kept as `<file>.eragon-backup`.
+ * The file a path finally names. A settings file kept in a dotfiles repository
+ * is often a symlink; writing through to its target keeps the link.
  */
-async function writeConfig(file: string, current: string | undefined, next: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  if (current !== undefined && current !== next) await writeFile(`${file}${BACKUP_SUFFIX}`, current);
-  const staged = `${file}.eragon-tmp-${process.pid}`;
-  await writeFile(staged, next);
-  await rename(staged, file);
+async function linkTarget(file: string): Promise<string> {
+  let current = file;
+  for (let hops = 0; hops < 40; hops += 1) {
+    try {
+      if (!(await lstat(current)).isSymbolicLink()) return current;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return current;
+      throw error;
+    }
+    current = resolve(dirname(current), await readlink(current));
+  }
+  throw new Error(`${file} is a symlink loop`);
+}
+
+async function writeAtomically(file: string, contents: string, mode: number): Promise<void> {
+  const staged = `${file}.eragon-tmp-${randomUUID()}`;
+  try {
+    await writeFile(staged, contents, { mode, flag: "wx" });
+    await rename(staged, file);
+  } finally {
+    await unlink(staged).catch(() => { /* A successful rename moved the file. */ });
+  }
+}
+
+/** Keep a private backup and replace the whole configuration atomically. */
+async function writeConfig(file: string, current: string | undefined, next: string, backup = true): Promise<void> {
+  if (current === next) return;
+  const target = await linkTarget(file);
+  await mkdir(dirname(target), { recursive: true });
+  const mode = current === undefined ? 0o600 : (await stat(target)).mode & 0o777;
+  if (backup && current !== undefined) await writeAtomically(`${file}${BACKUP_SUFFIX}`, current, 0o600);
+  await writeAtomically(target, next, mode);
+}
+
+function hookFile(agent: Agent, env: InstallEnvironment): string | undefined {
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  if (agent === "claude-code") return join(env.CLAUDE_CONFIG_DIR ?? join(home, ".claude"), "settings.json");
+  if (agent === "codex") return join(env.CODEX_HOME ?? join(home, ".codex"), "hooks.json");
+  return undefined;
+}
+
+function shellArgument(value: string): string {
+  return /^[\w/.:=-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * One double-quoted argument that cmd, PowerShell and Git Bash all read the
+ * same way. Codex runs `commandWindows` in the session's shell, which is any
+ * of the three. Each expands something inside double quotes (`%`, `$`, a
+ * backtick), so a value containing one cannot be passed safely.
+ */
+export function windowsArgument(value: string): string {
+  if (/^[\w/.:=-]+$/.test(value)) return value;
+  if (/["%$`\r\n]/.test(value)) {
+    throw new Error(`cannot quote ${JSON.stringify(value)} for every Windows shell; install to a path without ", %, $ or a backtick`);
+  }
+  return `"${value}"`;
+}
+
+export type RecallHandlerOptions = {
+  platform: NodeJS.Platform;
+  /** `eragon-context-mcp` on PATH is this binary. */
+  byName: boolean;
+  /** The bridge entry point, `bin/eragon-context-mcp.mjs`. */
+  bin?: string;
+};
+
+/**
+ * The hook entry for one client.
+ *
+ * On macOS and Linux both clients run `command` with a shell. It names the
+ * bridge as `eragon-context-mcp` when that is this binary on PATH, otherwise by
+ * its absolute path; the entry point runs through `#!/usr/bin/env node`.
+ *
+ * Windows cannot execute the `.mjs` entry point, and the npm `.cmd` shim needs
+ * a shell. Claude Code gets its exec form, `node` with arguments and no shell
+ * at all. Codex gets `commandWindows`, run by the session's shell (cmd by
+ * default, or PowerShell or Git Bash): `node "<entry point>" …` with forward
+ * slashes reads the same in all three.
+ */
+export function recallHandler(agent: Agent, gatewayUrl: string, options: RecallHandlerOptions): JsonObject {
+  const bin = options.bin ?? BRIDGE_BIN;
+  // Claude Code already uses its environment for the MCP URL. Codex's --url
+  // matches the URL in its existing MCP registration.
+  const args = agent === "codex" ? ["recall-hook", "--url", gatewayUrl] : ["recall-hook"];
+  const command = [options.byName ? COMMAND : bin, ...args].map(shellArgument).join(" ");
+  const windowsBin = bin.replaceAll("\\", "/");
+  const windows = options.platform !== "win32" ? {} : agent === "claude-code"
+    ? { command: "node", args: [windowsBin, ...args] }
+    : { commandWindows: ["node", windowsBin, ...args].map(windowsArgument).join(" ") };
+  return {
+    type: "command",
+    command,
+    timeout: RECALL_TIMEOUT_SECONDS,
+    statusMessage: RECALL_STATUS,
+    ...(agent === "codex" ? { additionalContextLimit: 0 } : {}),
+    ...windows,
+  };
+}
+
+function promptHookGroups(config: JsonObject, file: string): unknown[] {
+  if (config.hooks !== undefined && !isObject(config.hooks)) throw new Error(`${file}: hooks must be an object`);
+  const groups = child(config, "hooks")[RECALL_EVENT];
+  if (groups === undefined) return [];
+  if (!Array.isArray(groups)) throw new Error(`${file}: hooks.${RECALL_EVENT} must be an array`);
+  return groups;
+}
+
+function separateRecallHooks(groups: unknown[]): { userGroups: unknown[]; managed: JsonObject[] } {
+  const userGroups: unknown[] = [];
+  const managed: JsonObject[] = [];
+  for (const group of groups) {
+    if (!isObject(group) || !Array.isArray(group.hooks)) {
+      userGroups.push(group);
+      continue;
+    }
+    const handlers = group.hooks.filter((handler: unknown) => {
+      if (!isObject(handler) || handler.type !== "command" || handler.statusMessage !== RECALL_STATUS) return true;
+      managed.push(handler);
+      return false;
+    });
+    if (handlers.length === group.hooks.length) userGroups.push(group);
+    else if (handlers.length > 0) userGroups.push({ ...group, hooks: handlers });
+  }
+  return { userGroups, managed };
+}
+
+function withRecallHook(config: JsonObject, groups: unknown[], handler: JsonObject): string {
+  const hooks = child(config, "hooks");
+  return json({ ...config, hooks: { ...hooks, [RECALL_EVENT]: [...groups, { hooks: [handler] }] } });
+}
+
+async function prepareRecallInstall(file: string, handler: JsonObject): Promise<() => Promise<void>> {
+  const current = await readOptional(file);
+  const config = parseObject(current, file);
+  const { userGroups, managed } = separateRecallHooks(promptHookGroups(config, file));
+  const next = withRecallHook(config, userGroups, handler);
+  // Reinstall can update the command while retaining the original backup.
+  return () => writeConfig(file, current, next, managed.length === 0);
+}
+
+/**
+ * Removes the managed recall hook from each client's hook file. A file that
+ * cannot be read or parsed is reported in `errors` and left alone; the other
+ * clients are still handled.
+ */
+export async function uninstallRecallHooks(
+  agents: readonly Agent[],
+  env: InstallEnvironment,
+  dryRun: boolean,
+): Promise<{ files: string[]; errors: string[] }> {
+  const files: string[] = [];
+  const errors: string[] = [];
+  for (const agent of new Set(agents)) {
+    const file = hookFile(agent, env);
+    if (file === undefined) continue;
+    try {
+      if (await uninstallRecallHook(file, dryRun)) files.push(file);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return { files, errors };
+}
+
+/** Whether `file` had a managed recall hook to remove. */
+async function uninstallRecallHook(file: string, dryRun: boolean): Promise<boolean> {
+  const current = await readOptional(file);
+  const config = parseObject(current, file);
+  const { userGroups, managed } = separateRecallHooks(promptHookGroups(config, file));
+  if (current === undefined || managed.length === 0) return false;
+  if (dryRun) return true;
+
+  const [handler] = managed;
+  if (handler !== undefined && managed.length === 1) {
+    const backupFile = `${file}${BACKUP_SUFFIX}`;
+    const backup = await readOptional(backupFile);
+    let unchanged = false;
+    try {
+      const original = parseObject(backup, backupFile);
+      unchanged = current === withRecallHook(original, promptHookGroups(original, backupFile), handler);
+    } catch {
+      // An invalid backup cannot restore the file. Remove the managed hook below.
+    }
+    if (unchanged) {
+      // A symlinked file keeps its link: only the file it points to changes.
+      if (backup === undefined) await unlink(await linkTarget(file));
+      else await writeConfig(file, current, backup, false);
+      return true;
+    }
+  }
+  const hooks = child(config, "hooks");
+  if (userGroups.length === 0) delete hooks[RECALL_EVENT];
+  else hooks[RECALL_EVENT] = userGroups;
+  if (Object.keys(hooks).length === 0) delete config.hooks;
+  await writeConfig(file, current, json(config), false);
+  return true;
 }
 
 const run = promisify(execFile);
@@ -261,7 +484,7 @@ function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: 
       return {
         files: [{ file: join(codexHome, "config.toml"), next: (current) => codexConfig(current ?? "", gatewayUrl) }],
         commands: [],
-        notes: missingKey,
+        notes: [...missingKey, "Review and trust the Eragon recall hook with /hooks in Codex."],
       };
     }
     case "pi": {
@@ -306,13 +529,29 @@ export async function install(options: {
     if (asked) wanted.push(agent);
   }
   const reports: InstallReport[] = [];
+  const handlerOptions = { platform: process.platform, byName: await bridgeOnPath(options.env) };
   for (const agent of wanted) {
     const steps = plan(agent, options.gatewayUrl, options.model, options.env);
-    if (!options.dryRun) {
-      for (const { file, next } of steps.files) {
+    const recallFile = hookFile(agent, options.env);
+    const report: InstallReport = {
+      agent,
+      files: [...steps.files.map(({ file }) => file), ...(recallFile === undefined ? [] : [recallFile])],
+      commands: steps.commands.map((command) => command.join(" ")),
+      notes: steps.notes,
+    };
+    reports.push(report);
+    if (options.dryRun) continue;
+    // One agent's unreadable file must not stop the others being configured.
+    // Every file this agent needs is read and parsed before anything is
+    // written, so a malformed one leaves this agent untouched.
+    try {
+      const writeHook = recallFile === undefined ? undefined
+        : await prepareRecallInstall(recallFile, recallHandler(agent, options.gatewayUrl, handlerOptions));
+      const writes = await Promise.all(steps.files.map(async ({ file, next }) => {
         const current = await readOptional(file);
-        await writeConfig(file, current, next(current));
-      }
+        return { file, current, next: next(current) };
+      }));
+      for (const { file, current, next } of writes) await writeConfig(file, current, next);
       for (const [command, ...args] of steps.commands) {
         try {
           // A `.cmd` shim runs only through a shell on Windows.
@@ -323,13 +562,10 @@ export async function install(options: {
           if (args[1] !== "remove") throw error;
         }
       }
+      await writeHook?.();
+    } catch (error) {
+      report.error = error instanceof Error ? error.message : String(error);
     }
-    reports.push({
-      agent,
-      files: steps.files.map(({ file }) => file),
-      commands: steps.commands.map((command) => command.join(" ")),
-      notes: steps.notes,
-    });
   }
   return reports;
 }
