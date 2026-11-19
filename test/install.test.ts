@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { codexConfig, install, opencodeConfig, piMcpConfig, piModelsConfig } from "../src/install.js";
 
 const GW = "https://acme.s.eragon.ai/gw";
+const BIN = fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url));
 
 describe("codexConfig", () => {
   it("adds the bridge with the key forwarded by name, never by value", () => {
@@ -174,11 +175,86 @@ describe("install", () => {
 
   it("runs as a command", () => {
     const env = sandbox(["pi"]);
-    const out = execFileSync(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), "install", "--agent", "pi", "--url", GW, "--model", "claude-sonnet-5-5"], {
+    const out = execFileSync(process.execPath, [BIN, "install", "--agent", "pi", "--url", GW, "--model", "claude-sonnet-5-5"], {
       encoding: "utf8",
       env: { ...env, PATH: `${env.PATH}:${process.env.PATH}` },
     });
     expect(out).toContain("pi");
     expect(JSON.parse(readFileSync(join(home, ".pi", "agent", "mcp.json"), "utf8")).mcpServers.eragon.exposure).toBe("direct");
+  });
+
+  it("merges one hook per client and restores byte-identical files on uninstall", () => {
+    const env = {
+      ...sandbox(["claude", "codex"]),
+      CLAUDE_CONFIG_DIR: join(home, "claude settings"),
+      CODEX_HOME: join(home, "codex settings"),
+      ANTHROPIC_AUTH_TOKEN: "fake-key",
+      ERAGON_API_KEY: "fake-key",
+    };
+    const userPrompt = { hooks: [{ type: "command", command: "/user/script recall-hook" }] };
+    const stop = [{ hooks: [{ type: "command", command: "/user/stop" }] }];
+    const claudeFile = join(env.CLAUDE_CONFIG_DIR, "settings.json");
+    const codexFile = join(env.CODEX_HOME, "hooks.json");
+    const originals = [
+      { file: claudeFile, original: `{ "hooks": { "Stop": ${JSON.stringify(stop)}, "UserPromptSubmit": [${JSON.stringify(userPrompt)}] } }\n\n` },
+      { file: codexFile, original: JSON.stringify({ description: "User hooks", hooks: { UserPromptSubmit: [userPrompt] } }, null, "\t") },
+    ];
+    mkdirSync(env.CLAUDE_CONFIG_DIR);
+    mkdirSync(env.CODEX_HOME);
+    for (const { file, original } of originals) writeFileSync(file, original, { mode: 0o600 });
+
+    const run = (...args: string[]) => execFileSync(process.execPath, [BIN, ...args], { env });
+    const installArgs = ["install", "--agent", "claude", "--agent", "codex", "--url"];
+    run(...installArgs, "https://previous.s.eragon.ai/gw");
+    run(...installArgs, GW);
+
+    for (const { file, original } of originals) {
+      const raw = readFileSync(file, "utf8");
+      const parsed = JSON.parse(raw);
+      expect(parsed.hooks.UserPromptSubmit).toHaveLength(2);
+      expect(parsed.hooks.UserPromptSubmit[0]).toEqual(userPrompt);
+      const handler = parsed.hooks.UserPromptSubmit[1].hooks[0];
+      expect(handler).toMatchObject({ type: "command", timeout: 3 });
+      expect(handler.command).toContain(BIN);
+      expect(handler.command).toContain(" recall-hook");
+      if (file === codexFile) {
+        expect(handler.command).toContain(` --url ${GW}`);
+        expect(handler.additionalContextLimit).toBe(0);
+        expect(parsed.description).toBe("User hooks");
+      } else {
+        expect(handler.command).toMatch(/ recall-hook$/);
+        expect(parsed.hooks.Stop).toEqual(stop);
+      }
+      expect(raw).not.toContain("fake-key");
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(readFileSync(`${file}.eragon-backup`, "utf8")).toBe(original);
+    }
+
+    run("uninstall");
+    run("uninstall");
+    for (const { file, original } of originals) expect(readFileSync(file, "utf8")).toBe(original);
+    expect(readFileSync(join(env.CODEX_HOME, "config.toml"), "utf8")).toContain("[mcp_servers.eragon]");
+  });
+
+  it("preserves user handlers edited after install and removes a file created only for recall", () => {
+    const env = sandbox(["claude", "codex"]);
+    const run = (...args: string[]) => execFileSync(process.execPath, [BIN, ...args], { env });
+    run("install", "--agent", "claude-code", "--agent", "codex", "--url", GW);
+    const claudeFile = join(home, ".claude", "settings.json");
+    const codexFile = join(home, ".codex", "hooks.json");
+    const config = JSON.parse(readFileSync(codexFile, "utf8"));
+    const userHandler = { type: "command", command: "user-prompt-hook" };
+    config.hooks.UserPromptSubmit[0].hooks.push(userHandler);
+    config.description = "Added after install";
+    writeFileSync(codexFile, JSON.stringify(config));
+
+    run("uninstall", "--agent", "claude");
+    expect(() => readFileSync(claudeFile)).toThrow(/ENOENT/);
+    expect(JSON.parse(readFileSync(codexFile, "utf8"))).toEqual(config);
+    run("uninstall", "--agent", "codex");
+    expect(JSON.parse(readFileSync(codexFile, "utf8"))).toEqual({
+      description: "Added after install",
+      hooks: { UserPromptSubmit: [{ hooks: [userHandler] }] },
+    });
   });
 });

@@ -11,6 +11,7 @@ export type GatewayRequest = {
   path: string;
   body: unknown;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 };
 
 export async function requestGateway({
@@ -19,6 +20,7 @@ export async function requestGateway({
   path,
   body,
   fetchImpl = fetch,
+  signal,
 }: GatewayRequest): Promise<GatewayResponse> {
   const base = gatewayUrl.replace(/\/+$/, "");
   const response = await fetchImpl(`${base}${path}`, {
@@ -31,6 +33,7 @@ export async function requestGateway({
     },
     body: JSON.stringify(body),
     redirect: "manual",
+    ...(signal === undefined ? {} : { signal }),
   });
   const text = await response.text();
   if (text === "") return { status: response.status, body: null };

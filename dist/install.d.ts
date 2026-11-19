@@ -35,6 +35,7 @@ export type InstallReport = {
     /** What the person still has to do or know. */
     notes: string[];
 };
+export declare function uninstallRecallHooks(agents: readonly Agent[], env: InstallEnvironment, dryRun: boolean): Promise<string[]>;
 /**
  * Configures each requested agent, or with `"detect"` each one whose binary
  * is on PATH, in the order of AGENTS. A dry run reports what it would do and

@@ -8,6 +8,7 @@ export type GatewayRequest = {
     path: string;
     body: unknown;
     fetchImpl?: typeof fetch;
+    signal?: AbortSignal;
 };
-export declare function requestGateway({ gatewayUrl, token, path, body, fetchImpl, }: GatewayRequest): Promise<GatewayResponse>;
+export declare function requestGateway({ gatewayUrl, token, path, body, fetchImpl, signal, }: GatewayRequest): Promise<GatewayResponse>;
 //# sourceMappingURL=client.d.ts.map

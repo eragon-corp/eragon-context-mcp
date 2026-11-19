@@ -1,14 +1,18 @@
-import { AGENTS, install } from "./install.js";
-import { runMemoryMcp } from "./server.js";
+import { AGENTS, install, uninstallRecallHooks } from "./install.js";
+import { runRecallHook } from "./recall-hook.js";
 const USAGE = `eragon-context-mcp — Eragon Memory for coding agents
 
 Usage:
   eragon-context-mcp [--url https://<your-eragon>/gw]
-  eragon-context-mcp install [--agent claude-code|codex|pi|opencode]... [--url URL] [--model ID] [--dry-run]
+  eragon-context-mcp install [--agent claude|claude-code|codex|pi|opencode]... [--url URL] [--model ID] [--dry-run]
+  eragon-context-mcp uninstall [--agent claude|claude-code|codex]... [--dry-run]
+  eragon-context-mcp recall-hook [--url URL]
 
 install registers this bridge with each coding agent on PATH (or each --agent
-named), and for pi and opencode adds an Eragon model provider when --model is
-given. It never writes the Gateway key: each agent reads it from its environment.
+named). It installs memory recall hooks for Claude Code and Codex, and adds an
+Eragon model provider for pi and opencode when --model is given. Each agent reads
+the Gateway key from its environment.
+uninstall removes the managed recall hooks. With no --agent it checks both clients.
 
 Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
@@ -79,8 +83,11 @@ function values(argv, flag) {
     return found;
 }
 const isAgent = (value) => AGENTS.includes(value);
+function namedAgents(argv) {
+    return values(argv, "--agent").map((agent) => agent === "claude" ? "claude-code" : agent);
+}
 async function runInstall(argv, environment) {
-    const named = values(argv, "--agent");
+    const named = namedAgents(argv);
     const unknown = named.filter((agent) => !isAgent(agent));
     if (unknown.length > 0) {
         console.error(`Unknown agent ${unknown.join(", ")}. Use one of: ${AGENTS.join(", ")}.`);
@@ -115,6 +122,19 @@ async function runInstall(argv, environment) {
     console.log("Start a new agent session to load the Eragon Memory tools.");
     return 0;
 }
+async function runUninstall(argv, environment) {
+    const agents = namedAgents(argv);
+    const supported = (agent) => agent === "claude-code" || agent === "codex";
+    if (!agents.every(supported)) {
+        console.error("Choose --agent claude (or claude-code) or --agent codex to uninstall a recall hook.");
+        return 1;
+    }
+    const dryRun = argv.includes("--dry-run");
+    const files = await uninstallRecallHooks(agents.length > 0 ? agents : ["claude-code", "codex"], environment, dryRun);
+    for (const file of files)
+        console.log(`${dryRun ? "Would remove" : "Removed"} Eragon recall hook from ${file}`);
+    return 0;
+}
 export async function main(argv = process.argv.slice(2)) {
     if (argv.includes("--help") || argv.includes("-h")) {
         console.log(USAGE);
@@ -122,11 +142,20 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (argv[0] === "install")
         return runInstall(argv.slice(1), process.env);
+    if (argv[0] === "uninstall")
+        return runUninstall(argv.slice(1), process.env);
+    if (argv[0] === "recall-hook") {
+        const config = resolveConfig(argv.slice(1));
+        if (config.ok)
+            await runRecallHook(config);
+        return 0;
+    }
     const config = resolveConfig(argv);
     if (!config.ok) {
         console.error(config.error);
         return 1;
     }
+    const { runMemoryMcp } = await import("./server.js");
     await runMemoryMcp(config);
     return 0;
 }

@@ -1,5 +1,5 @@
 import { VERSION } from "./version.js";
-export async function requestGateway({ gatewayUrl, token, path, body, fetchImpl = fetch, }) {
+export async function requestGateway({ gatewayUrl, token, path, body, fetchImpl = fetch, signal, }) {
     const base = gatewayUrl.replace(/\/+$/, "");
     const response = await fetchImpl(`${base}${path}`, {
         method: "POST",
@@ -11,6 +11,7 @@ export async function requestGateway({ gatewayUrl, token, path, body, fetchImpl 
         },
         body: JSON.stringify(body),
         redirect: "manual",
+        ...(signal === undefined ? {} : { signal }),
     });
     const text = await response.text();
     if (text === "")

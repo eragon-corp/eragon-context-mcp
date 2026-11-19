@@ -65,8 +65,8 @@ bridge with each, the way each was tested:
 
 | Agent | What it writes |
 |---|---|
-| Claude Code | `claude mcp add --scope user eragon -- eragon-context-mcp` |
-| Codex | `[mcp_servers.eragon]` in `config.toml`, with `env_vars = ["ERAGON_API_KEY"]` |
+| Claude Code | `claude mcp add --scope user eragon -- eragon-context-mcp` and a recall hook in `~/.claude/settings.json` |
+| Codex | `[mcp_servers.eragon]` in `config.toml`, with `env_vars = ["ERAGON_API_KEY"]`, and a recall hook in `$CODEX_HOME/hooks.json` (`~/.codex/hooks.json` by default) |
 | Pi | `mcp.json` with `exposure: "direct"`, and an `eragon` provider in `models.json` when `--model` is given |
 | OpenCode | the bridge in `opencode.json`, and an `eragon` provider when `--model` is given |
 
@@ -76,7 +76,39 @@ Claude Code reads `ANTHROPIC_AUTH_TOKEN`, the others `ERAGON_API_KEY`, from
 the environment they start in. A file it changes is kept beside itself as
 `<file>.eragon-backup`.
 
-The sections below are the same setup by hand.
+## Automatic recall in Claude Code and Codex
+
+On each submitted prompt, the `UserPromptSubmit` hook sends the prompt text
+as `{"query": "…"}` to `POST /gw/v1/memory/recall` with the configured Gateway
+key. The Gateway returns its rendered `<eragon_memory_context>` in `text`
+with `ok: true`. The hook adds that text to the conversation as additional
+context. The Gateway can then skip duplicate recall, and the client keeps the
+recalled text in its own history for subsequent turns and prompt caching.
+
+**Privacy.** The hook sends each submitted prompt to Eragon. Recalled text
+can appear in the agent’s local transcript. The hook reads the key from the
+agent’s environment. Timeout, empty recall, or an older Gateway that returns
+404 lets the prompt continue without recalled context. The hook has a
+three-second deadline.
+
+Use `install --agent claude` (or `claude-code`) or `install --agent codex` to
+set up one client. Claude Code uses the Gateway URL and key from its
+environment. Codex uses the URL supplied at install and reads the key from
+its environment. In Codex, open `/hooks` and trust the Eragon recall hook
+before its first run.
+
+Remove Eragon’s managed recall hooks from both clients with:
+
+```sh
+eragon-context-mcp uninstall
+```
+
+Add `--agent claude` or `--agent codex` to remove only that client’s hook.
+Uninstall preserves user hooks and MCP registrations. If the hook file has
+had no user edits since installation, uninstall restores its original bytes
+from `.eragon-backup` or deletes a file created solely for the hook.
+
+The next sections show how to register the MCP bridge by hand.
 
 ## Claude Code
 

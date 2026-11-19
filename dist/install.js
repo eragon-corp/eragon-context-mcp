@@ -9,11 +9,14 @@
  * changes is first copied beside itself as `<file>.eragon-backup`.
  */
 import { execFile } from "node:child_process";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { RECALL_EVENT, RECALL_TIMEOUT_SECONDS } from "./recall-hook.js";
 export const AGENTS = ["claude-code", "codex", "pi", "opencode"];
 /** The binary whose presence on PATH says the agent is installed. */
 const AGENT_BINARY = {
@@ -26,13 +29,15 @@ const SERVER = "eragon";
 const COMMAND = "eragon-context-mcp";
 const KEY_VARIABLE = "ERAGON_API_KEY";
 const BACKUP_SUFFIX = ".eragon-backup";
+const RECALL_STATUS = "Recalling Eragon Memory (eragon-context-mcp)";
+const BRIDGE_BIN = fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url));
 function isObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 function parseObject(current, file) {
     if (current === undefined || current.trim() === "")
         return {};
-    const parsed = JSON.parse(current);
+    const parsed = JSON.parse(current.replace(/^\uFEFF/, ""));
     if (!isObject(parsed))
         throw new Error(`${file} is not a JSON object`);
     return parsed;
@@ -189,18 +194,142 @@ async function readOptional(file) {
         throw error;
     }
 }
-/**
- * Writes `next` to `file` through a temporary file and a rename, so an agent
- * starting meanwhile never reads half a config; the previous contents are
- * kept as `<file>.eragon-backup`.
- */
-async function writeConfig(file, current, next) {
+async function writeAtomically(file, contents, mode) {
+    const staged = `${file}.eragon-tmp-${randomUUID()}`;
+    try {
+        await writeFile(staged, contents, { mode, flag: "wx" });
+        await rename(staged, file);
+    }
+    finally {
+        await unlink(staged).catch(() => { });
+    }
+}
+/** Keep a private backup and replace the whole configuration atomically. */
+async function writeConfig(file, current, next, backup = true) {
+    if (current === next)
+        return;
     await mkdir(dirname(file), { recursive: true });
-    if (current !== undefined && current !== next)
-        await writeFile(`${file}${BACKUP_SUFFIX}`, current);
-    const staged = `${file}.eragon-tmp-${process.pid}`;
-    await writeFile(staged, next);
-    await rename(staged, file);
+    const mode = current === undefined ? 0o600 : (await stat(file)).mode & 0o777;
+    if (backup && current !== undefined)
+        await writeAtomically(`${file}${BACKUP_SUFFIX}`, current, 0o600);
+    await writeAtomically(file, next, mode);
+}
+function hookFile(agent, env) {
+    const home = env.HOME ?? env.USERPROFILE ?? homedir();
+    if (agent === "claude-code")
+        return join(env.CLAUDE_CONFIG_DIR ?? join(home, ".claude"), "settings.json");
+    if (agent === "codex")
+        return join(env.CODEX_HOME ?? join(home, ".codex"), "hooks.json");
+    return undefined;
+}
+function shellArgument(value) {
+    return /^[\w/.:=-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+function recallHandler(agent, gatewayUrl) {
+    // Claude Code already uses its environment for the MCP URL. Codex's --url
+    // matches the URL in its existing MCP registration.
+    const args = agent === "codex" ? ["recall-hook", "--url", gatewayUrl] : ["recall-hook"];
+    const command = [BRIDGE_BIN, ...args].map(shellArgument).join(" ");
+    // Windows cannot execute the .mjs entry point directly.
+    const windows = process.platform !== "win32" ? {} : agent === "claude-code"
+        ? { command: process.execPath, args: [BRIDGE_BIN, ...args] }
+        : { commandWindows: `& ${[process.execPath, BRIDGE_BIN, ...args].map((arg) => `'${arg.replaceAll("'", "''")}'`).join(" ")}` };
+    return {
+        type: "command",
+        command,
+        timeout: RECALL_TIMEOUT_SECONDS,
+        statusMessage: RECALL_STATUS,
+        ...(agent === "codex" ? { additionalContextLimit: 0 } : {}),
+        ...windows,
+    };
+}
+function promptHookGroups(config, file) {
+    if (config.hooks !== undefined && !isObject(config.hooks))
+        throw new Error(`${file}: hooks must be an object`);
+    const groups = child(config, "hooks")[RECALL_EVENT];
+    if (groups === undefined)
+        return [];
+    if (!Array.isArray(groups))
+        throw new Error(`${file}: hooks.${RECALL_EVENT} must be an array`);
+    return groups;
+}
+function separateRecallHooks(groups) {
+    const userGroups = [];
+    const managed = [];
+    for (const group of groups) {
+        if (!isObject(group) || !Array.isArray(group.hooks)) {
+            userGroups.push(group);
+            continue;
+        }
+        const handlers = group.hooks.filter((handler) => {
+            if (!isObject(handler) || handler.type !== "command" || handler.statusMessage !== RECALL_STATUS)
+                return true;
+            managed.push(handler);
+            return false;
+        });
+        if (handlers.length === group.hooks.length)
+            userGroups.push(group);
+        else if (handlers.length > 0)
+            userGroups.push({ ...group, hooks: handlers });
+    }
+    return { userGroups, managed };
+}
+function withRecallHook(config, groups, handler) {
+    const hooks = child(config, "hooks");
+    return json({ ...config, hooks: { ...hooks, [RECALL_EVENT]: [...groups, { hooks: [handler] }] } });
+}
+async function prepareRecallInstall(file, handler) {
+    const current = await readOptional(file);
+    const config = parseObject(current, file);
+    const { userGroups, managed } = separateRecallHooks(promptHookGroups(config, file));
+    const next = withRecallHook(config, userGroups, handler);
+    // Reinstall can update the command while retaining the original backup.
+    return () => writeConfig(file, current, next, managed.length === 0);
+}
+export async function uninstallRecallHooks(agents, env, dryRun) {
+    const files = [];
+    for (const agent of new Set(agents)) {
+        const file = hookFile(agent, env);
+        if (file === undefined)
+            continue;
+        const current = await readOptional(file);
+        const config = parseObject(current, file);
+        const { userGroups, managed } = separateRecallHooks(promptHookGroups(config, file));
+        if (current === undefined || managed.length === 0)
+            continue;
+        files.push(file);
+        if (dryRun)
+            continue;
+        const [handler] = managed;
+        if (handler !== undefined && managed.length === 1) {
+            const backupFile = `${file}${BACKUP_SUFFIX}`;
+            const backup = await readOptional(backupFile);
+            let unchanged = false;
+            try {
+                const original = parseObject(backup, backupFile);
+                unchanged = current === withRecallHook(original, promptHookGroups(original, backupFile), handler);
+            }
+            catch {
+                // An invalid backup cannot restore the file. Remove the managed hook below.
+            }
+            if (unchanged) {
+                if (backup === undefined)
+                    await unlink(file);
+                else
+                    await writeConfig(file, current, backup, false);
+                continue;
+            }
+        }
+        const hooks = child(config, "hooks");
+        if (userGroups.length === 0)
+            delete hooks[RECALL_EVENT];
+        else
+            hooks[RECALL_EVENT] = userGroups;
+        if (Object.keys(hooks).length === 0)
+            delete config.hooks;
+        await writeConfig(file, current, json(config), false);
+    }
+    return files;
 }
 const run = promisify(execFile);
 function plan(agent, gatewayUrl, model, env) {
@@ -233,7 +362,7 @@ function plan(agent, gatewayUrl, model, env) {
             return {
                 files: [{ file: join(codexHome, "config.toml"), next: (current) => codexConfig(current ?? "", gatewayUrl) }],
                 commands: [],
-                notes: missingKey,
+                notes: [...missingKey, "Review and trust the Eragon recall hook with /hooks in Codex."],
             };
         }
         case "pi": {
@@ -274,7 +403,10 @@ export async function install(options) {
     const reports = [];
     for (const agent of wanted) {
         const steps = plan(agent, options.gatewayUrl, options.model, options.env);
+        const recallFile = hookFile(agent, options.env);
         if (!options.dryRun) {
+            const writeHook = recallFile === undefined ? undefined
+                : await prepareRecallInstall(recallFile, recallHandler(agent, options.gatewayUrl));
             for (const { file, next } of steps.files) {
                 const current = await readOptional(file);
                 await writeConfig(file, current, next(current));
@@ -291,10 +423,11 @@ export async function install(options) {
                         throw error;
                 }
             }
+            await writeHook?.();
         }
         reports.push({
             agent,
-            files: steps.files.map(({ file }) => file),
+            files: [...steps.files.map(({ file }) => file), ...(recallFile === undefined ? [] : [recallFile])],
             commands: steps.commands.map((command) => command.join(" ")),
             notes: steps.notes,
         });
