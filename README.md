@@ -74,22 +74,34 @@ Name agents with `--agent` (repeatable) to skip detection, and add
 `--dry-run` to see what it would change. It never writes the Gateway key:
 Claude Code reads `ANTHROPIC_AUTH_TOKEN`, the others `ERAGON_API_KEY`, from
 the environment they start in. A file it changes is kept beside itself as
-`<file>.eragon-backup`.
+`<file>.eragon-backup`. A settings file that is a symlink (for example into a
+dotfiles repository) stays a symlink: the change is written to the file it
+points to. If a client's settings file is not valid JSON, `install` names the
+file, leaves that client untouched, configures the others, and exits 1.
 
 ## Automatic recall in Claude Code and Codex
 
-On each submitted prompt, the `UserPromptSubmit` hook sends the prompt text
-as `{"query": "…"}` to `POST /gw/v1/memory/recall` with the configured Gateway
-key. The Gateway returns its rendered `<eragon_memory_context>` in `text`
-with `ok: true`. The hook adds that text to the conversation as additional
-context. The Gateway can then skip duplicate recall, and the client keeps the
-recalled text in its own history for subsequent turns and prompt caching.
+On each `UserPromptSubmit` event, the hook sends the prompt text as
+`{"query": "…"}` to `POST /gw/v1/memory/recall` with the configured Gateway
+key. The Gateway replies `{"text": "<eragon_memory_context>…</eragon_memory_context>", "count": 2, "status": "ok"}`;
+any 2xx reply with a non-blank `text` is a recall. The hook adds that text to
+the conversation as additional context. The Gateway can then skip duplicate
+recall, and the client keeps the recalled text in its own history for
+subsequent turns and prompt caching.
 
-**Privacy.** The hook sends each submitted prompt to Eragon. Recalled text
-can appear in the agent’s local transcript. The hook reads the key from the
-agent’s environment. Timeout, empty recall, or an older Gateway that returns
-404 lets the prompt continue without recalled context. The hook has a
-three-second deadline.
+Recall never holds up or blocks a prompt. The hook gives up 2.5 seconds after
+it starts, half a second inside the client's three-second hook timeout, so a
+slow Gateway costs one turn without recalled context rather than a timeout
+error. A timeout, an empty recall, an older Gateway that returns 404, or any
+other failure prints nothing and exits 0, and the prompt continues as typed.
+
+**Privacy.** The hook sends the text of every `UserPromptSubmit` event to
+Eragon. In Claude Code that is more than the prompts you type: the event also
+fires for scheduled tasks such as each `/loop` iteration, for a background
+subagent reporting back, and for messages another session sends to yours, so
+their text is sent too. Recalled text can appear in the agent's local
+transcript. The hook reads the key from the agent's environment; the key is
+never written to a settings file or passed on a command line.
 
 Use `install --agent claude` (or `claude-code`) or `install --agent codex` to
 set up one client. Claude Code uses the Gateway URL and key from its
@@ -97,13 +109,35 @@ environment. Codex uses the URL supplied at install and reads the key from
 its environment. In Codex, open `/hooks` and trust the Eragon recall hook
 before its first run.
 
-Remove Eragon’s managed recall hooks from both clients with:
+When `eragon-context-mcp` on your PATH is the copy running `install` (as after
+`npm install -g`), the hook calls it by name, like the MCP registration does.
+Otherwise it calls the package's entry point by absolute path; run `install`
+again after moving or reinstalling the package. Either way the entry point
+runs with `node` from the client's PATH. A client launched from the Dock,
+Finder or a desktop shortcut may not have your shell's PATH: if `node` (for
+example one installed with nvm or fnm) is missing from it, the hook cannot
+start and the client reports a hook error on each prompt, though the prompt
+still goes through. Start the client from a shell, or put `node` on the PATH
+that GUI apps see.
+
+On Windows, neither client can run the `.mjs` entry point directly. Claude
+Code gets an exec-form hook (`"command": "node"` with `args`), which runs
+without a shell and needs a Claude Code version whose hooks support `args`.
+Codex runs `commandWindows` in the session's shell (cmd by default, or
+PowerShell or Git Bash), so the hook is written as one
+`node "<entry point>" recall-hook --url <url>` line that all three read the
+same way. Its shape is tested, and it runs under sh and PowerShell in the test
+suite; it has not been run under cmd or on Windows itself. `install` refuses
+an entry-point path or URL containing `"`, `%`, `$` or a backtick, which one of
+those shells would expand.
+
+Remove Eragon's managed recall hooks from both clients with:
 
 ```sh
 eragon-context-mcp uninstall
 ```
 
-Add `--agent claude` or `--agent codex` to remove only that client’s hook.
+Add `--agent claude` or `--agent codex` to remove only that client's hook.
 Uninstall preserves user hooks and MCP registrations. If the hook file has
 had no user edits since installation, uninstall restores its original bytes
 from `.eragon-backup` or deletes a file created solely for the hook.

@@ -1,5 +1,5 @@
 import { AGENTS, install, uninstallRecallHooks, type Agent } from "./install.js";
-import { runRecallHook } from "./recall-hook.js";
+import { recallTimeLeft, runRecallHook } from "./recall-hook.js";
 
 const USAGE = `eragon-context-mcp — Eragon Memory for coding agents
 
@@ -135,13 +135,19 @@ async function runInstall(argv: string[], environment: NodeJS.ProcessEnv): Promi
     return 1;
   }
   for (const report of reports) {
+    if (report.error !== undefined) {
+      console.error(`${report.agent}: not configured. ${report.error}`);
+      continue;
+    }
     console.log(`${report.agent}: ${dryRun ? "would configure" : "configured"}`);
     for (const file of report.files) console.log(`  wrote ${file}`);
     for (const command of report.commands) console.log(`  ran ${command}`);
     for (const note of report.notes) console.log(`  next: ${note}`);
   }
-  console.log("Start a new agent session to load the Eragon Memory tools.");
-  return 0;
+  if (reports.some((report) => report.error === undefined)) {
+    console.log("Start a new agent session to load the Eragon Memory tools.");
+  }
+  return reports.some((report) => report.error !== undefined) ? 1 : 0;
 }
 
 async function runUninstall(argv: string[], environment: NodeJS.ProcessEnv): Promise<number> {
@@ -152,9 +158,10 @@ async function runUninstall(argv: string[], environment: NodeJS.ProcessEnv): Pro
     return 1;
   }
   const dryRun = argv.includes("--dry-run");
-  const files = await uninstallRecallHooks(agents.length > 0 ? agents : ["claude-code", "codex"], environment, dryRun);
+  const { files, errors } = await uninstallRecallHooks(agents.length > 0 ? agents : ["claude-code", "codex"], environment, dryRun);
   for (const file of files) console.log(`${dryRun ? "Would remove" : "Removed"} Eragon recall hook from ${file}`);
-  return 0;
+  for (const error of errors) console.error(`Left unchanged: ${error}`);
+  return errors.length > 0 ? 1 : 0;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -165,6 +172,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv[0] === "install") return runInstall(argv.slice(1), process.env);
   if (argv[0] === "uninstall") return runUninstall(argv.slice(1), process.env);
   if (argv[0] === "recall-hook") {
+    // Nothing left open may keep the hook alive past its deadline: the client
+    // would report the timeout as an error on every prompt.
+    setTimeout(() => process.exit(0), recallTimeLeft() + 100).unref();
     const config = resolveConfig(argv.slice(1));
     if (config.ok) await runRecallHook(config);
     return 0;

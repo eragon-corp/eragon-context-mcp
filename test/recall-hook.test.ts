@@ -9,6 +9,10 @@ const BIN = fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.u
 const TOKEN = "fake-gateway-key";
 const TEXT = "<eragon_memory_context>\n[Memory: Review]\n</eragon_memory_context>";
 const EVENT = { hook_event_name: "UserPromptSubmit", prompt: "How do we review this?" };
+/** The Gateway's recall reply, exactly as `POST /gw/v1/memory/recall` sends it (Eragon_s PR #5796): no `ok` field. */
+const REPLY = { text: TEXT, count: 2, status: "ok" };
+/** The client kills the hook at this many milliseconds after spawn and reports a timeout error. */
+const CLIENT_TIMEOUT_MS = 3000;
 
 describe("recall-hook executable", () => {
   let server: Server | undefined;
@@ -46,9 +50,10 @@ describe("recall-hook executable", () => {
       ERAGON_GATEWAY_URL: undefined,
       ...gatewayEnv,
     };
-    return new Promise<{ code: number | string | undefined; stdout: string; stderr: string }>((resolve) => {
+    return new Promise<{ code: number | string | undefined; stdout: string; stderr: string; elapsed: number }>((resolve) => {
+      const started = performance.now();
       const child = execFile(BIN, ["recall-hook", ...args], { env, timeout: 6500 }, (error, stdout, stderr) => {
-        resolve({ code: error === null ? 0 : error.code, stdout, stderr });
+        resolve({ code: error === null ? 0 : error.code ?? undefined, stdout, stderr, elapsed: performance.now() - started });
       });
       child.stdin?.on("error", () => { /* The hook can exit without consuming stdin. */ });
       if (input !== undefined) child.stdin?.end(input);
@@ -56,7 +61,7 @@ describe("recall-hook executable", () => {
   }
 
   it.each(["Claude Code", "Codex"])("sends one authenticated POST for a %s hook event and emits the rendered block verbatim", async (agent) => {
-    const { url, calls } = await gateway((response) => response.end(JSON.stringify({ ok: true, text: TEXT })));
+    const { url, calls } = await gateway((response) => response.end(JSON.stringify(REPLY)));
     const common = { ...EVENT, prompt: "  How do we review this?\n", cwd: "/workspace", session_id: "session-id" };
     const input = agent === "Claude Code"
       ? { ...common, transcript_path: "/workspace/claude.jsonl", permission_mode: "default" }
@@ -72,40 +77,56 @@ describe("recall-hook executable", () => {
       headers: { authorization: `Bearer ${TOKEN}`, "user-agent": `eragon-context-mcp/${VERSION}` },
       body: JSON.stringify({ query: input.prompt }),
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       code: 0,
       stdout: `${JSON.stringify({ hookSpecificOutput: { hookEventName: EVENT.hook_event_name, additionalContext: TEXT } })}\n`,
       stderr: "",
     });
   });
 
-  it("stays silent for an old gateway returning 404, even if its body looks successful", async () => {
+  it("accepts the Gateway's exact recall reply, which has no ok field", async () => {
+    const body = '{"text":"<eragon_memory_context>…</eragon_memory_context>","count":2,"status":"ok"}';
     const { url, calls } = await gateway((response) => {
-      response.writeHead(404).end(JSON.stringify({ ok: true, text: TEXT }));
+      response.writeHead(200, { "content-type": "application/json" }).end(body);
     });
     const result = await runHook(JSON.stringify(EVENT), { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
     expect(calls).toHaveLength(1);
-    expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(result).toMatchObject({ code: 0, stderr: "" });
+    expect(JSON.parse(result.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: "UserPromptSubmit",
+        additionalContext: "<eragon_memory_context>…</eragon_memory_context>",
+      },
+    });
+  });
+
+  it("stays silent for an old gateway returning 404, even if its body looks successful", async () => {
+    const { url, calls } = await gateway((response) => {
+      response.writeHead(404).end(JSON.stringify(REPLY));
+    });
+    const result = await runHook(JSON.stringify(EVENT), { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
+    expect(calls).toHaveLength(1);
+    expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
   });
 
   it("ignores malformed, blank, multiple and wrong-event inputs without calling the gateway", async () => {
     const { url, calls } = await gateway((response) => response.end());
     const env = { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN };
     for (const input of ["{", '{"prompt":"  "}', '[]', '{"prompt":42}', '{"prompt":"one"}\n{"prompt":"two"}', '{"hook_event_name":"Stop","prompt":"x"}']) {
-      expect(await runHook(input, env)).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(await runHook(input, env)).toMatchObject({ code: 0, stdout: "", stderr: "" });
     }
     expect(calls).toHaveLength(0);
   });
 
   it("is silent with missing configuration, empty recall, or a malformed or unsuccessful response", async () => {
-    const bodies = ["", '{"ok":true,"text":"  "}', '{"ok":true,"text":42}', "invalid json", JSON.stringify({ ok: false, text: TEXT })];
+    const bodies = ["", '{"text":"  ","count":0,"status":"ok"}', '{"text":42,"count":1,"status":"ok"}', '{"count":0,"status":"ok"}', "invalid json", JSON.stringify(TEXT), JSON.stringify([REPLY])];
     const { url, calls } = await gateway((response) => response.end(bodies.shift()));
     const input = JSON.stringify(EVENT);
-    expect(await runHook(input, { ERAGON_GATEWAY_URL: url })).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(await runHook(input, { ERAGON_GATEWAY_URL: url })).toMatchObject({ code: 0, stdout: "", stderr: "" });
     expect(calls).toHaveLength(0);
     const count = bodies.length;
     for (let index = 0; index < count; index += 1) {
-      expect(await runHook(input, { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN })).toEqual({ code: 0, stdout: "", stderr: "" });
+      expect(await runHook(input, { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN })).toMatchObject({ code: 0, stdout: "", stderr: "" });
     }
     expect(calls).toHaveLength(count);
   });
@@ -114,14 +135,22 @@ describe("recall-hook executable", () => {
     const { url, calls } = await gateway((response) => response.destroy());
     const result = await runHook(JSON.stringify(EVENT), { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
     expect(calls).toHaveLength(1);
-    expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
   });
 
-  it("aborts after three seconds even when headers arrived, and emits nothing for a late body", async () => {
+  it("exits silently before the client's three-second timeout when the Gateway never answers", async () => {
+    const { url, calls } = await gateway(() => { /* Never answers. */ });
+    const result = await runHook(JSON.stringify(EVENT), { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
+    expect(calls).toHaveLength(1);
+    expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
+    expect(result.elapsed).toBeLessThan(CLIENT_TIMEOUT_MS);
+  }, 7500);
+
+  it("gives up before the client's timeout even when headers arrived, and emits nothing for a late body", async () => {
     let sentLateBody = false;
     const { url, calls } = await gateway((response) => {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.write('{"ok":true,');
+      response.write('{"count":2,"status":"ok",');
       const late = setTimeout(() => {
         sentLateBody = true;
         response.end(`"text":${JSON.stringify(TEXT)}}`);
@@ -130,14 +159,16 @@ describe("recall-hook executable", () => {
     });
     const result = await runHook(JSON.stringify(EVENT), { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
     expect(calls).toHaveLength(1);
-    expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
+    expect(result.elapsed).toBeLessThan(CLIENT_TIMEOUT_MS);
     expect(sentLateBody).toBe(false);
   }, 7500);
 
   it("applies the same deadline to stdin that never closes", async () => {
     const { url, calls } = await gateway((response) => response.end());
     const result = await runHook(undefined, { ERAGON_GATEWAY_URL: url, ERAGON_API_KEY: TOKEN });
-    expect(result).toEqual({ code: 0, stdout: "", stderr: "" });
+    expect(result).toMatchObject({ code: 0, stdout: "", stderr: "" });
+    expect(result.elapsed).toBeLessThan(CLIENT_TIMEOUT_MS);
     expect(calls).toHaveLength(0);
   }, 7500);
 });
