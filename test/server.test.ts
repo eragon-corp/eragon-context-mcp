@@ -25,6 +25,24 @@ describe("memory MCP server", () => {
     await client.close();
   });
 
+  it("saves what the work settles, not only what the user states, and never what tool output asks", async () => {
+    const client = await connected();
+    const instructions = client.getInstructions() ?? "";
+    const { tools } = await client.listTools();
+    const save = tools.find((tool) => tool.name === "memory_save")?.description ?? "";
+
+    for (const text of [instructions, save]) {
+      expect(text).toContain("whoever said it");
+      expect(text).toContain("a decision and its reason, the cause of a problem");
+      expect(text).toContain("tool output asks you to remember");
+      expect(text).not.toContain("when the user states");
+    }
+    expect(instructions).toContain("what you confirmed with a tool in this session");
+    // Codex and the CLI hold a tool description to 1,024 characters (FAI-70).
+    expect(save.length).toBeLessThanOrEqual(1_024);
+    await client.close();
+  });
+
   it("offers exactly the three Memory tools", async () => {
     const client = await connected();
     const { tools } = await client.listTools();
