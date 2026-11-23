@@ -22,6 +22,8 @@ const NO_KEY = "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN t
 const KEY_VARIABLES = ["ERAGON_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 /** Longer than a keychain read takes, shorter than a client waits for an MCP server to start. */
 export const KEY_COMMAND_TIMEOUT_MS = 15_000;
+/** Far more than any Gateway key; more output than this is not a key. */
+const KEY_COMMAND_OUTPUT_LIMIT = 16_384;
 function explicitUrl(argv) {
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];
@@ -56,8 +58,6 @@ export function resolveConfig(argv, environment = process.env) {
             error: "Pass --url https://<your-eragon>/gw or set ERAGON_GATEWAY_URL.",
         };
     }
-    if (token === undefined || token.trim() === "")
-        return { ok: false, error: NO_KEY };
     let parsed;
     try {
         parsed = new URL(gatewayUrl);
@@ -68,6 +68,9 @@ export function resolveConfig(argv, environment = process.env) {
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         return { ok: false, error: "The Eragon Gateway URL must use HTTPS or HTTP." };
     }
+    // Last, so a URL problem is reported before loadConfig runs a key command.
+    if (token === undefined || token.trim() === "")
+        return { ok: false, error: NO_KEY };
     return { ok: true, gatewayUrl: gatewayUrl.replace(/\/+$/, ""), token };
 }
 /**
@@ -100,11 +103,14 @@ export async function loadConfig(argv, environment = process.env, options = {}) 
  * Runs a key command through the shell, as Claude Code runs `apiKeyHelper`,
  * and takes the one word it prints. What it printed never reaches an error:
  * a failing command may still have printed a key. Its stdout is piped, never
- * inherited, because the bridge's own stdout is the MCP channel.
+ * inherited, because the bridge's own stdout is the MCP channel. On POSIX it
+ * leads its own process group, so a deadline stops everything it started: a
+ * shell's child that outlived it would hold the pipe and keep the bridge alive.
  */
 function keyFromCommand(command, environment, timeoutMs) {
     return new Promise((resolve) => {
         let printed = "";
+        let overflow = false;
         let settled = false;
         const finish = (result) => {
             if (settled)
@@ -113,14 +119,25 @@ function keyFromCommand(command, environment, timeoutMs) {
             clearTimeout(timer);
             resolve(result);
         };
-        const child = spawn(command, { shell: true, env: environment, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+        const windows = process.platform === "win32";
+        const child = spawn(command, {
+            shell: true,
+            env: environment,
+            stdio: ["ignore", "pipe", "ignore"],
+            windowsHide: true,
+            detached: !windows,
+        });
         const timer = setTimeout(() => {
-            child.kill("SIGKILL");
+            stopTree(child.pid, windows, () => child.kill("SIGKILL"));
+            child.stdout.destroy();
+            child.unref();
             finish({ ok: false, error: `The key command did not finish within ${timeoutMs / 1000} s.` });
         }, timeoutMs);
         child.stdout.setEncoding("utf8");
         child.stdout.on("data", (chunk) => {
-            if (printed.length < 16_384)
+            if (overflow || printed.length + chunk.length > KEY_COMMAND_OUTPUT_LIMIT)
+                overflow = true;
+            else
                 printed += chunk;
         });
         child.on("error", () => finish({ ok: false, error: "The key command could not be started." }));
@@ -130,13 +147,29 @@ function keyFromCommand(command, environment, timeoutMs) {
                 return;
             }
             const key = printed.trim();
-            if (key === "" || /\s/.test(key)) {
+            if (overflow || key === "" || /\s/.test(key)) {
                 finish({ ok: false, error: "The key command did not print one key." });
                 return;
             }
             finish({ ok: true, key });
         });
     });
+}
+/** Stops a key command and what it started: its POSIX process group, or its Windows process tree. */
+function stopTree(pid, windows, fallback) {
+    if (pid === undefined)
+        return fallback();
+    try {
+        if (windows) {
+            spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", fallback).unref();
+        }
+        else {
+            process.kill(-pid, "SIGKILL");
+        }
+    }
+    catch {
+        fallback();
+    }
 }
 function values(argv, flag) {
     const found = [];
@@ -164,14 +197,21 @@ async function runInstall(argv, environment) {
     }
     const dryRun = argv.includes("--dry-run");
     const keyCommand = values(argv, "--key-command").at(-1);
-    const reports = await install({
-        agents: named.length === 0 ? "detect" : named.filter(isAgent),
-        gatewayUrl,
-        model: values(argv, "--model")[0],
-        env: environment,
-        dryRun,
-        ...(keyCommand === undefined || keyCommand.trim() === "" ? {} : { keyCommand }),
-    });
+    let reports;
+    try {
+        reports = await install({
+            agents: named.length === 0 ? "detect" : named.filter(isAgent),
+            gatewayUrl,
+            model: values(argv, "--model")[0],
+            env: environment,
+            dryRun,
+            ...(keyCommand === undefined || keyCommand.trim() === "" ? {} : { keyCommand }),
+        });
+    }
+    catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        return 1;
+    }
     if (reports.length === 0) {
         console.log(`No coding agent found on PATH (looked for ${AGENTS.join(", ")}). Name one with --agent.`);
         return 1;

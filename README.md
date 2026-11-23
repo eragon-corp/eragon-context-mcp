@@ -157,9 +157,12 @@ keychain under the service `eragon-flux`:
 
 ```sh
 account="$(/usr/bin/security dump-keychain | grep -o 'eragon-flux:[0-9a-f]\{32\}-desktop' | head -n 1)"
-test -n "$account" || echo "No Eragon Flux Desktop key in the login keychain. Run eragon-flux setup --desktop first."
-eragon-context-mcp install --agent claude-code --url https://<your-eragon>/gw \
-  --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
+if [ -n "$account" ]; then
+  eragon-context-mcp install --agent claude-code --url https://<your-eragon>/gw \
+    --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
+else
+  echo "No Eragon Flux Desktop key in the login keychain. Run eragon-flux setup --desktop first."
+fi
 ```
 
 The entry holds the command, never the key. Quit Claude Desktop, open it again,
@@ -183,8 +186,10 @@ The key is resolved in this order:
 
 The key command runs only when none of the three variables is set, so an
 exported key always wins. It runs through the shell, as Claude Code runs
-`apiKeyHelper`, and must print one key within 15 seconds. The bridge never
-logs what it printed. `install --key-command` writes the command, and the URL
+`apiKeyHelper`, and must print one key within 15 seconds; at the deadline the
+bridge stops it and everything it started. The bridge never logs what it
+printed. On Windows, `install` refuses a key command with `%`, double quotes
+or line breaks, because cmd.exe would change it: put it in a script instead. `install --key-command` writes the command, and the URL
 it belongs to, into each agent's entry.
 
 When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if

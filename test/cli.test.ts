@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -142,9 +142,15 @@ describe("loadConfig: the key from a command when the environment has none", () 
   });
 
   it("reports a URL problem before running any command", async () => {
-    const resolved = await loadConfig(["--key-command", node("process.exit(7)")], PATH_ONLY);
-    expect(resolved.ok).toBe(false);
-    if (!resolved.ok) expect(resolved.error).toContain("--url");
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const marker = join(dir, "ran");
+    const command = node(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(7)`);
+    const missing = await loadConfig(["--key-command", command], PATH_ONLY);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain("--url");
+    const invalid = await loadConfig(["--url", "not-a-url", "--key-command", command], PATH_ONLY);
+    expect(invalid).toEqual({ ok: false, error: "The Eragon Gateway URL is invalid." });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it("refuses a command that fails, without repeating what it printed", async () => {
@@ -171,6 +177,30 @@ describe("loadConfig: the key from a command when the environment has none", () 
         expect(resolved.error).not.toContain("esk_one");
       }
     }
+  });
+
+  it("refuses output past its limit rather than keep the first part as the key", async () => {
+    const resolved = await loadConfig(
+      ["--url", GW, "--key-command", node("process.stdout.write('a'.repeat(20000)); process.stdout.write(' esk_second')")],
+      PATH_ONLY,
+    );
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.error).toContain("did not print one key");
+      expect(resolved.error).not.toContain("aaaa");
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stops what the command started too, so nothing outlives the deadline", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const pidFile = join(dir, "pid");
+    // Two commands, so the shell cannot exec the first: it stays as the parent of a waiting child.
+    const command = `${node(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 20000)`)}; echo esk_late`;
+    const resolved = await loadConfig(["--url", GW, "--key-command", command], PATH_ONLY, { keyCommandTimeoutMs: 1000 });
+    expect(resolved.ok).toBe(false);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
   });
 
   it("stops a command that does not finish", async () => {
@@ -201,8 +231,10 @@ describe("the bridge as an MCP client starts it, with no key in its environment"
       }, 10_000);
       child.stdout.on("data", (chunk) => {
         stdout += String(chunk);
-        const line = stdout.split("\n").find((part) => part.trim() !== "");
-        if (line === undefined) return;
+        // A chunk is not a message: parse only a line the bridge has finished.
+        const end = stdout.indexOf("\n");
+        if (end === -1) return;
+        const line = stdout.slice(0, end);
         clearTimeout(timer);
         child.kill();
         resolve({ answer: JSON.parse(line), stderr });

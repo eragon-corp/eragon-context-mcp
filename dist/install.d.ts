@@ -36,6 +36,15 @@ export type InstallReport = {
     notes: string[];
 };
 /**
+ * One argument of a command line cmd.exe hands to an agent's `.cmd` shim.
+ * Windows runs npm shims only through a shell, and Node then joins the
+ * arguments with spaces, unquoted, so `--key-command "print-key --desktop"`
+ * would register `print-key` alone. Quoted as node.exe parses arguments;
+ * what cmd.exe would expand or end early inside quotes (`%`, `"`, a line
+ * break) is refused rather than registered as a different command.
+ */
+export declare function cmdArg(arg: string): string;
+/**
  * Configures each requested agent, or with `"detect"` each one whose binary
  * is on PATH, in the order of AGENTS. A dry run reports what it would do and
  * changes nothing.

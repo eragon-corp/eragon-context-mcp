@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { codexConfig, install, opencodeConfig, piMcpConfig, piModelsConfig } from "../src/install.js";
+import { cmdArg, codexConfig, install, opencodeConfig, piMcpConfig, piModelsConfig } from "../src/install.js";
 
 const GW = "https://acme.s.eragon.ai/gw";
 
@@ -227,5 +227,22 @@ describe("install", () => {
     });
     expect(out).toContain("pi");
     expect(JSON.parse(readFileSync(join(home, ".pi", "agent", "mcp.json"), "utf8")).mcpServers.eragon.exposure).toBe("direct");
+  });
+});
+
+describe("cmdArg", () => {
+  // Windows runs an agent's npm shim only through cmd.exe, and Node joins the arguments with spaces unquoted.
+  it("keeps a plain argument and quotes one that cmd.exe would split", () => {
+    expect(cmdArg("--scope")).toBe("--scope");
+    expect(cmdArg("https://acme.s.eragon.ai/gw")).toBe("https://acme.s.eragon.ai/gw");
+    expect(cmdArg("print-key --desktop")).toBe('"print-key --desktop"');
+    expect(cmdArg("C:\\keys\\read key.cmd")).toBe('"C:\\keys\\read key.cmd"');
+    expect(cmdArg("C:\\keys dir\\")).toBe('"C:\\keys dir\\\\"');
+  });
+
+  it("refuses what cmd.exe would expand or end early, rather than register a different command", () => {
+    for (const unsafe of ['powershell -Command "Get-Key"', "read %USERPROFILE%\\key", "a\nb"]) {
+      expect(() => cmdArg(unsafe)).toThrow("script");
+    }
   });
 });

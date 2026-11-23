@@ -207,6 +207,22 @@ async function writeConfig(file, current, next) {
     await writeFile(staged, next);
     await rename(staged, file);
 }
+/**
+ * One argument of a command line cmd.exe hands to an agent's `.cmd` shim.
+ * Windows runs npm shims only through a shell, and Node then joins the
+ * arguments with spaces, unquoted, so `--key-command "print-key --desktop"`
+ * would register `print-key` alone. Quoted as node.exe parses arguments;
+ * what cmd.exe would expand or end early inside quotes (`%`, `"`, a line
+ * break) is refused rather than registered as a different command.
+ */
+export function cmdArg(arg) {
+    if (/^[\w\-.:/\\=@,+]+$/.test(arg))
+        return arg;
+    if (/[%"\r\n]/.test(arg)) {
+        throw new Error("On Windows this argument cannot contain %, double quotes or line breaks. Put the key command in a script and pass the script's path.");
+    }
+    return `"${arg.replace(/(\\+)$/, "$1$1")}"`;
+}
 const run = promisify(execFile);
 function plan(agent, gatewayUrl, model, env, keyCommand) {
     // Windows has no HOME; its agents keep their config under the profile directory.
@@ -281,15 +297,19 @@ export async function install(options) {
     const reports = [];
     for (const agent of wanted) {
         const steps = plan(agent, options.gatewayUrl, options.model, options.env, options.keyCommand);
+        // A `.cmd` shim runs only through a shell on Windows, which needs each
+        // argument quoted. Quoted before anything runs, so a refused argument
+        // never leaves an agent with its old entry removed and no new one.
+        const windows = process.platform === "win32";
+        const commands = steps.commands.map(([command, ...args]) => [command ?? "", ...(windows ? args.map(cmdArg) : args)]);
         if (!options.dryRun) {
             for (const { file, next } of steps.files) {
                 const current = await readOptional(file);
                 await writeConfig(file, current, next(current));
             }
-            for (const [command, ...args] of steps.commands) {
+            for (const [command, ...args] of commands) {
                 try {
-                    // A `.cmd` shim runs only through a shell on Windows.
-                    await run(command ?? "", args, { env: options.env, shell: process.platform === "win32" });
+                    await run(command ?? "", args, { env: options.env, shell: windows });
                 }
                 catch (error) {
                     // `mcp remove` fails when nothing is registered yet; that is the
