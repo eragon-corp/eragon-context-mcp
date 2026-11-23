@@ -5,8 +5,9 @@
  *
  * No configuration it writes holds the Gateway key. Every agent reads it from
  * its own environment at run time (ERAGON_API_KEY, or ANTHROPIC_AUTH_TOKEN for
- * Claude Code), so a key that is replaced never lingers in a file. A file it
- * changes is first copied beside itself as `<file>.eragon-backup`.
+ * Claude Code), or, with `--key-command`, the bridge runs a command that reads
+ * it where the agent keeps it; so a key that is replaced never lingers in a
+ * file. A file it changes is first copied beside itself as `<file>.eragon-backup`.
  */
 import { execFile } from "node:child_process";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -51,6 +52,11 @@ function child(parent: JsonObject, key: string): JsonObject {
 
 const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
+/** The bridge's arguments in an agent's entry: its Eragon, and the key command when one reads the key. */
+function bridgeArgs(gatewayUrl: string, keyCommand: string | undefined): string[] {
+  return ["--url", gatewayUrl, ...(keyCommand === undefined ? [] : ["--key-command", keyCommand])];
+}
+
 const TOML_HEADER = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$/;
 
 /**
@@ -63,7 +69,7 @@ const TOML_HEADER = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$/;
  * entry written as an inline table or dotted key is refused rather than
  * guessed at.
  */
-export function codexConfig(current: string, gatewayUrl: string): string {
+export function codexConfig(current: string, gatewayUrl: string, keyCommand?: string): string {
   const kept: string[] = [];
   let table = "";
   let skipping = false;
@@ -87,7 +93,7 @@ export function codexConfig(current: string, gatewayUrl: string): string {
   const entry = [
     `[mcp_servers.${SERVER}]`,
     `command = "${COMMAND}"`,
-    `args = ["--url", ${JSON.stringify(gatewayUrl)}]`,
+    `args = [${bridgeArgs(gatewayUrl, keyCommand).map((arg) => JSON.stringify(arg)).join(", ")}]`,
     `env_vars = ["${KEY_VARIABLE}"]`,
   ].join("\n");
   return body === "" ? `${entry}\n` : `${body}\n\n${entry}\n`;
@@ -98,7 +104,7 @@ export function codexConfig(current: string, gatewayUrl: string): string {
  * codemode, hides MCP tools until a script searches for them; on the PR
  * preview that cost a correction three attempts, and direct exposure took one.
  */
-export function piMcpConfig(current: string | undefined, gatewayUrl: string): string {
+export function piMcpConfig(current: string | undefined, gatewayUrl: string, keyCommand?: string): string {
   const config = parseObject(current, "mcp.json");
   return json({
     ...config,
@@ -106,7 +112,7 @@ export function piMcpConfig(current: string | undefined, gatewayUrl: string): st
       ...child(config, "mcpServers"),
       [SERVER]: {
         command: COMMAND,
-        args: ["--url", gatewayUrl],
+        args: bridgeArgs(gatewayUrl, keyCommand),
         env: { [KEY_VARIABLE]: `\${${KEY_VARIABLE}}` },
         exposure: "direct",
       },
@@ -140,7 +146,12 @@ export function piModelsConfig(current: string | undefined, gatewayUrl: string, 
  * model is named. Its own provider, not an override of `anthropic`, so the
  * person's direct Anthropic setup keeps working.
  */
-export function opencodeConfig(current: string | undefined, gatewayUrl: string, model: string | undefined): string {
+export function opencodeConfig(
+  current: string | undefined,
+  gatewayUrl: string,
+  model: string | undefined,
+  keyCommand?: string,
+): string {
   const config = parseObject(current, "opencode.json");
   const providers = child(config, "provider");
   const existing = child(providers, SERVER);
@@ -164,7 +175,7 @@ export function opencodeConfig(current: string | undefined, gatewayUrl: string, 
       ...child(config, "mcp"),
       [SERVER]: {
         type: "local",
-        command: [COMMAND, "--url", gatewayUrl],
+        command: [COMMAND, ...bridgeArgs(gatewayUrl, keyCommand)],
         environment: { [KEY_VARIABLE]: `{env:${KEY_VARIABLE}}` },
         enabled: true,
       },
@@ -231,10 +242,10 @@ const run = promisify(execFile);
 
 type Plan = { files: Array<{ file: string; next: (current: string | undefined) => string }>; commands: string[][]; notes: string[] };
 
-function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: InstallEnvironment): Plan {
+function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: InstallEnvironment, keyCommand?: string): Plan {
   // Windows has no HOME; its agents keep their config under the profile directory.
   const home = env.HOME ?? env.USERPROFILE ?? homedir();
-  const missingKey = env[KEY_VARIABLE] === undefined
+  const missingKey = env[KEY_VARIABLE] === undefined && keyCommand === undefined
     ? [`Export ${KEY_VARIABLE}=<your personal Gateway key> in the shell you start it from.`]
     : [];
   switch (agent) {
@@ -245,10 +256,12 @@ function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: 
         // the URL and key the model calls already use.
         commands: [
           ["claude", "mcp", "remove", SERVER, "--scope", "user"],
-          ["claude", "mcp", "add", "--scope", "user", SERVER, "--", COMMAND],
+          // A key from a command belongs to one Eragon, so the entry names
+          // that Eragon rather than follow ANTHROPIC_BASE_URL.
+          ["claude", "mcp", "add", "--scope", "user", SERVER, "--", COMMAND, ...(keyCommand === undefined ? [] : bridgeArgs(gatewayUrl, keyCommand))],
         ],
         notes: [
-          ...(env.ANTHROPIC_BASE_URL === undefined || env.ANTHROPIC_AUTH_TOKEN === undefined
+          ...(keyCommand === undefined && (env.ANTHROPIC_BASE_URL === undefined || env.ANTHROPIC_AUTH_TOKEN === undefined)
             ? ["Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN as the Gateway Connect page shows; the bridge uses them."]
             : []),
           ...(env[KEY_VARIABLE] !== undefined && env[KEY_VARIABLE] !== env.ANTHROPIC_AUTH_TOKEN
@@ -259,7 +272,7 @@ function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: 
     case "codex": {
       const codexHome = env.CODEX_HOME ?? join(home, ".codex");
       return {
-        files: [{ file: join(codexHome, "config.toml"), next: (current) => codexConfig(current ?? "", gatewayUrl) }],
+        files: [{ file: join(codexHome, "config.toml"), next: (current) => codexConfig(current ?? "", gatewayUrl, keyCommand) }],
         commands: [],
         notes: missingKey,
       };
@@ -268,7 +281,7 @@ function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: 
       const dir = env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent");
       return {
         files: [
-          { file: join(dir, "mcp.json"), next: (current) => piMcpConfig(current, gatewayUrl) },
+          { file: join(dir, "mcp.json"), next: (current) => piMcpConfig(current, gatewayUrl, keyCommand) },
           ...(model === undefined
             ? []
             : [{ file: join(dir, "models.json"), next: (current: string | undefined) => piModelsConfig(current, gatewayUrl, model) }]),
@@ -280,7 +293,7 @@ function plan(agent: Agent, gatewayUrl: string, model: string | undefined, env: 
     case "opencode": {
       const dir = join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "opencode");
       return {
-        files: [{ file: join(dir, "opencode.json"), next: (current) => opencodeConfig(current, gatewayUrl, model) }],
+        files: [{ file: join(dir, "opencode.json"), next: (current) => opencodeConfig(current, gatewayUrl, model, keyCommand) }],
         commands: [],
         notes: [...missingKey, ...(model === undefined ? [] : [`Start it with: opencode --model ${SERVER}/${model}`])],
       };
@@ -299,6 +312,8 @@ export async function install(options: {
   model: string | undefined;
   env: InstallEnvironment;
   dryRun: boolean;
+  /** A command that prints the key, run by the bridge when its environment has none (ERA-5023). */
+  keyCommand?: string | undefined;
 }): Promise<InstallReport[]> {
   const wanted: Agent[] = [];
   for (const agent of AGENTS) {
@@ -307,7 +322,7 @@ export async function install(options: {
   }
   const reports: InstallReport[] = [];
   for (const agent of wanted) {
-    const steps = plan(agent, options.gatewayUrl, options.model, options.env);
+    const steps = plan(agent, options.gatewayUrl, options.model, options.env, options.keyCommand);
     if (!options.dryRun) {
       for (const { file, next } of steps.files) {
         const current = await readOptional(file);

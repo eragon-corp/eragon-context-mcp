@@ -10,13 +10,13 @@ export type Agent = (typeof AGENTS)[number];
  * entry written as an inline table or dotted key is refused rather than
  * guessed at.
  */
-export declare function codexConfig(current: string, gatewayUrl: string): string;
+export declare function codexConfig(current: string, gatewayUrl: string, keyCommand?: string): string;
 /**
  * Pi's mcp.json with the bridge declared directly. Pi's default exposure,
  * codemode, hides MCP tools until a script searches for them; on the PR
  * preview that cost a correction three attempts, and direct exposure took one.
  */
-export declare function piMcpConfig(current: string | undefined, gatewayUrl: string): string;
+export declare function piMcpConfig(current: string | undefined, gatewayUrl: string, keyCommand?: string): string;
 /** Pi's models.json with an Eragon provider that speaks Anthropic Messages through the Gateway. */
 export declare function piModelsConfig(current: string | undefined, gatewayUrl: string, model: string): string;
 /**
@@ -24,7 +24,7 @@ export declare function piModelsConfig(current: string | undefined, gatewayUrl: 
  * model is named. Its own provider, not an override of `anthropic`, so the
  * person's direct Anthropic setup keeps working.
  */
-export declare function opencodeConfig(current: string | undefined, gatewayUrl: string, model: string | undefined): string;
+export declare function opencodeConfig(current: string | undefined, gatewayUrl: string, model: string | undefined, keyCommand?: string): string;
 export type InstallEnvironment = Record<string, string | undefined>;
 export type InstallReport = {
     agent: Agent;
@@ -46,5 +46,7 @@ export declare function install(options: {
     model: string | undefined;
     env: InstallEnvironment;
     dryRun: boolean;
+    /** A command that prints the key, run by the bridge when its environment has none (ERA-5023). */
+    keyCommand?: string | undefined;
 }): Promise<InstallReport[]>;
 //# sourceMappingURL=install.d.ts.map

@@ -146,6 +146,26 @@ that need approval. For headless runs, approve the Eragon tools for that run:
 codex exec -c 'mcp_servers.eragon.default_tools_approval_mode="approve"' "<prompt>"
 ```
 
+## Claude Desktop with Eragon Flux
+
+Claude Code inside Claude Desktop gets its Gateway key from Desktop's
+third-party inference configuration, not from an environment variable, so the
+bridge it starts finds none and exits with `Set ERAGON_API_KEY, …`. Give the
+bridge a command that reads the key where Eragon Flux keeps it instead. On
+macOS, `eragon-flux setup --desktop` stores the Desktop key in the login
+keychain under the service `eragon-flux`:
+
+```sh
+account="$(/usr/bin/security dump-keychain | grep -o 'eragon-flux:[0-9a-f]\{32\}-desktop' | head -n 1)"
+test -n "$account" || echo "No Eragon Flux Desktop key in the login keychain. Run eragon-flux setup --desktop first."
+eragon-context-mcp install --agent claude-code --url https://<your-eragon>/gw \
+  --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
+```
+
+The entry holds the command, never the key. Quit Claude Desktop, open it again,
+and start a new Code session. The key needs **Use my Eragon context**, or
+`memory_search` answers 403.
+
 ## Configuration
 
 The URL is resolved in this order:
@@ -159,6 +179,13 @@ The key is resolved in this order:
 1. `ERAGON_API_KEY`
 2. `ANTHROPIC_API_KEY`
 3. `ANTHROPIC_AUTH_TOKEN`
+4. What `--key-command` prints, or else `ERAGON_API_KEY_COMMAND`'s
+
+The key command runs only when none of the three variables is set, so an
+exported key always wins. It runs through the shell, as Claude Code runs
+`apiKeyHelper`, and must print one key within 15 seconds. The bridge never
+logs what it printed. `install --key-command` writes the command, and the URL
+it belongs to, into each agent's entry.
 
 When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
 `ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,

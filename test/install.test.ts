@@ -172,6 +172,53 @@ describe("install", () => {
     expect(codex?.notes.join(" ")).toContain("ERAGON_API_KEY");
   });
 
+  it("passes a key command to every agent with the URL it belongs to, and writes no key anywhere", async () => {
+    const env = { ...sandbox(["claude", "codex", "pi", "opencode"]), ERAGON_API_KEY: "esk_secret", ANTHROPIC_AUTH_TOKEN: "esk_secret" };
+    const keyCommand = "/usr/bin/security find-generic-password -s eragon-flux -a eragon-flux:abc-desktop -w";
+
+    const report = await install({ agents: "detect", gatewayUrl: GW, model: "claude-sonnet-5-5", env, dryRun: false, keyCommand });
+
+    expect(report.map((r) => r.agent)).toEqual(["claude-code", "codex", "pi", "opencode"]);
+    // A key from a command belongs to one Eragon, so Claude Code's entry names it instead of following ANTHROPIC_BASE_URL.
+    expect(readFileSync(join(home, "claude.log"), "utf8").trim().split("\n")).toEqual([
+      "mcp remove eragon --scope user",
+      `mcp add --scope user eragon -- eragon-context-mcp --url ${GW} --key-command ${keyCommand}`,
+    ]);
+    expect(readFileSync(join(home, ".codex", "config.toml"), "utf8")).toContain(
+      `args = ["--url", "${GW}", "--key-command", ${JSON.stringify(keyCommand)}]`,
+    );
+    expect(JSON.parse(readFileSync(join(home, ".pi", "agent", "mcp.json"), "utf8")).mcpServers.eragon.args).toEqual([
+      "--url", GW, "--key-command", keyCommand,
+    ]);
+    expect(JSON.parse(readFileSync(join(home, ".config", "opencode", "opencode.json"), "utf8")).mcp.eragon.command).toEqual([
+      "eragon-context-mcp", "--url", GW, "--key-command", keyCommand,
+    ]);
+    for (const file of [
+      join(home, ".codex", "config.toml"),
+      join(home, ".pi", "agent", "mcp.json"),
+      join(home, ".pi", "agent", "models.json"),
+      join(home, ".config", "opencode", "opencode.json"),
+      join(home, "claude.log"),
+    ]) {
+      expect(readFileSync(file, "utf8")).not.toContain("esk_secret");
+    }
+  });
+
+  it("does not ask for an exported key when a key command supplies it", async () => {
+    const env = sandbox(["codex"]);
+    const [codex] = await install({ agents: ["codex"], gatewayUrl: GW, model: undefined, env, dryRun: true, keyCommand: "print-key" });
+    expect(codex?.notes.join(" ")).not.toContain("Export ERAGON_API_KEY");
+  });
+
+  it("takes --key-command on the command line", () => {
+    const env = sandbox(["claude"]);
+    execFileSync(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), "install", "--agent", "claude-code", "--url", GW, "--key-command", "print-key --desktop"], {
+      encoding: "utf8",
+      env: { ...env, PATH: `${env.PATH}:${process.env.PATH}` },
+    });
+    expect(readFileSync(join(home, "claude.log"), "utf8")).toContain(`eragon-context-mcp --url ${GW} --key-command print-key --desktop`);
+  });
+
   it("runs as a command", () => {
     const env = sandbox(["pi"]);
     const out = execFileSync(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), "install", "--agent", "pi", "--url", GW, "--model", "claude-sonnet-5-5"], {
