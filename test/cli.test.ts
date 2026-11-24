@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { loadConfig, resolveConfig } from "../src/cli.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+
+import { loadConfig, prepareBridge, resolveConfig } from "../src/cli.js";
+import { createBridgeServer } from "../src/server.js";
 
 describe("resolveConfig", () => {
   it("uses Claude Code's existing Gateway environment without storing another secret", () => {
@@ -214,6 +218,114 @@ describe("loadConfig: the key from a command when the environment has none", () 
   });
 });
 
+describe("prepareBridge: a key command never holds the bridge's start, and its failure leaves Memory working", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  /** The Memory answers of a Gateway stand-in, and the keys it was called with. */
+  function memoryGateway() {
+    const keys: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      keys.push(String((init?.headers as Record<string, string>).authorization));
+      const status = String(input).endsWith("/v1/memory/search") ? 200 : 404;
+      return new Response(JSON.stringify(status === 200 ? { memories: [] } : {}), { status });
+    };
+    return { keys, fetchImpl };
+  }
+
+  async function connected(key: Parameters<typeof createBridgeServer>[0]["key"], fetchImpl: typeof fetch) {
+    const server = createBridgeServer({ gatewayUrl: GW, key, fetchImpl, connectors: { cacheFile: null } });
+    const client = new Client({ name: "test", version: "0.0.0" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(b), client.connect(a)]);
+    return client;
+  }
+
+  it("--key-command failure keeps Memory listed, and the next Memory call reads the key again", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const marker = join(dir, "unlocked");
+    // Fails the first time (a locked keychain), prints the key after.
+    const command = node(
+      `const fs = require('node:fs'); if (fs.existsSync(${JSON.stringify(marker)})) process.stdout.write('esk_unlocked'); else { fs.writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(4); }`,
+    );
+    const logged: string[] = [];
+    const prepared = prepareBridge(["--url", GW, "--key-command", command], PATH_ONLY, { log: (message) => logged.push(message) });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    const failed = await prepared.key();
+    expect(failed.ok).toBe(false);
+    expect(logged.join("\n")).toContain("exit 4");
+
+    const gateway = memoryGateway();
+    const client = await connected(prepared.key, gateway.fetchImpl);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(["memory_search", "memory_save", "memory_share"]);
+
+    const result = await client.callTool({ name: "memory_search", arguments: { query: "deploy" } });
+    expect(result.isError).not.toBe(true);
+    expect(gateway.keys).toContain("Bearer esk_unlocked");
+    await client.close();
+  });
+
+  it("a command that keeps failing answers each Memory call with why, and the bridge stays up", async () => {
+    const prepared = prepareBridge(["--url", GW, "--key-command", node("process.stdout.write('esk_leaked'); process.exit(3)")], PATH_ONLY, {
+      log: () => undefined,
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+    const gateway = memoryGateway();
+    const client = await connected(prepared.key, gateway.fetchImpl);
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(["memory_search", "memory_save", "memory_share"]);
+
+    const result = await client.callTool({ name: "memory_search", arguments: { query: "deploy" } });
+    expect(result.isError).toBe(true);
+    const message = (result.content as { text: string }[])[0]?.text ?? "";
+    expect(message).toContain("exit 3");
+    expect(message).not.toContain("esk_leaked");
+    expect(gateway.keys).toEqual([]);
+    await client.close();
+  });
+
+  it("runs the command once for many callers, and not again after it printed a key", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const counter = join(dir, "runs");
+    const command = node(
+      `const fs = require('node:fs'); fs.appendFileSync(${JSON.stringify(counter)}, 'x'); process.stdout.write('esk_once')`,
+    );
+    const prepared = prepareBridge(["--url", GW, "--key-command", command], PATH_ONLY);
+    if (!prepared.ok) throw new Error(prepared.error);
+    const answers = await Promise.all([prepared.key(), prepared.key(), prepared.key()]);
+    expect(answers.every((answer) => answer.ok && answer.token === "esk_once")).toBe(true);
+    await prepared.key();
+    expect(readFileSync(counter, "utf8")).toBe("x");
+  });
+
+  it("uses an exported key at once and never runs the command; still refuses with no key and no command", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const marker = join(dir, "ran");
+    const command = node(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`);
+    const prepared = prepareBridge(["--url", GW, "--key-command", command], { ...PATH_ONLY, ERAGON_API_KEY: "esk_env" });
+    if (!prepared.ok) throw new Error(prepared.error);
+    expect(await prepared.key()).toEqual({ ok: true, token: "esk_env" });
+    // A key given outright needs no cache index by source.
+    expect(prepared.keySource).toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(marker)).toBe(false);
+    // A key command names the cache entry its last run read, so a restart lists Connections before it prints (ERA-5056 review).
+    const viaCommand = prepareBridge(["--url", GW, "--key-command", command], PATH_ONLY);
+    expect(viaCommand.ok && viaCommand.keySource).toBe(`command:${command}`);
+    const refused = prepareBridge(["--url", GW], PATH_ONLY);
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error).toContain("Set ERAGON_API_KEY");
+    expect(prepareBridge(["--url", "not-a-url", "--key-command", command], PATH_ONLY)).toEqual({
+      ok: false,
+      error: "The Eragon Gateway URL is invalid.",
+    });
+  });
+});
+
 describe("the bridge as an MCP client starts it, with no key in its environment", () => {
   /** Starts the real command, says hello over stdio, and returns its first answer or its exit and stderr. */
   function start(args: string[]): Promise<{ answer?: unknown; code?: number | null; stderr: string }> {
@@ -254,15 +366,25 @@ describe("the bridge as an MCP client starts it, with no key in its environment"
     });
   }
 
+  /** Nothing listens here, so the bridge's background probe never leaves this machine. */
+  const LOCAL_GW = "http://127.0.0.1:9/gw";
+
   it("answers initialize when a key command supplies the key", async () => {
-    const started = await start(["--url", GW, "--key-command", node("process.stdout.write('esk_from_keychain')")]);
+    const started = await start(["--url", LOCAL_GW, "--key-command", node("process.stdout.write('esk_from_keychain')")]);
     expect(started.stderr).not.toContain("Set ERAGON_API_KEY");
     expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: expect.any(String) } } });
     expect(JSON.stringify(started.answer)).not.toContain("esk_from_keychain");
   });
 
+  it("answers initialize at once while a slow key command is still running", async () => {
+    const begun = Date.now();
+    const started = await start(["--url", LOCAL_GW, "--key-command", node("setTimeout(() => process.stdout.write('esk_slow'), 3000)")]);
+    expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: expect.any(String) } } });
+    expect(Date.now() - begun).toBeLessThan(2_500);
+  });
+
   it("exits with the same refusal as before when there is no key command", async () => {
-    const started = await start(["--url", GW]);
+    const started = await start(["--url", LOCAL_GW]);
     expect(started.code).toBe(1);
     expect(started.stderr).toContain("Set ERAGON_API_KEY");
   });

@@ -1,3 +1,4 @@
+import { type KeySource } from "./server.js";
 type ConfigEnvironment = Partial<Record<"ERAGON_GATEWAY_URL" | "ANTHROPIC_BASE_URL" | "ERAGON_API_KEY" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN", string>>;
 export type ResolvedConfig = {
     ok: true;
@@ -23,6 +24,31 @@ export declare function resolveConfig(argv: string[], environment?: ConfigEnviro
 export declare function loadConfig(argv: string[], environment?: NodeJS.ProcessEnv, options?: {
     keyCommandTimeoutMs?: number;
 }): Promise<ResolvedConfig>;
+/**
+ * What the bridge starts with, without waiting for a key command (ERA-5056).
+ * A key in the environment is used at once. A key command runs in the
+ * background as the bridge starts: the client's start-up window (10 s in
+ * older Codex) must not be spent on a keychain prompt, and the first
+ * tools/list already waits at most 5 s. A command that fails is run again by
+ * the next tool call, so Memory works once the key can be read (an unlocked
+ * keychain), and its tools are listed all along. The command (not the key)
+ * also names the capabilities cache entry the last run read, so a restart
+ * whose command is slower than 5 s still lists Connections at once; the key it
+ * prints is checked against that entry when it comes. A missing URL, or no key and
+ * no command, still stops the bridge at once with the same message as before.
+ */
+export declare function prepareBridge(argv: string[], environment?: NodeJS.ProcessEnv, options?: {
+    keyCommandTimeoutMs?: number;
+    log?: (message: string) => void;
+}): {
+    ok: true;
+    gatewayUrl: string;
+    key: KeySource;
+    keySource?: string;
+} | {
+    ok: false;
+    error: string;
+};
 export declare function main(argv?: string[]): Promise<number>;
 export {};
 //# sourceMappingURL=cli.d.ts.map
