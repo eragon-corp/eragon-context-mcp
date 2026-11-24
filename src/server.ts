@@ -13,6 +13,7 @@ import {
   type Capabilities,
   type ProbeOutcome,
 } from "./capabilities.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./client.js";
 import { callConnectorTool, CONNECTOR_TOOL_NAMES, CONNECTOR_TOOLS, type LearnedTool } from "./connector-tools.js";
 import { callMemoryTool, MEMORY_TOOLS, type MemoryToolConfig } from "./memory-tools.js";
 import { VERSION } from "./version.js";
@@ -49,6 +50,12 @@ export type KeySource = () => Promise<KeyResult>;
 export type BridgeOptions = {
   gatewayUrl: string;
   key: KeySource;
+  /**
+   * What the key comes from when it is not given outright (the key command),
+   * so a restart can list yesterday's Connections before the command has
+   * printed the key. Only its SHA-256 is kept.
+   */
+  keySource?: string;
   fetchImpl?: typeof fetch;
   /** Off: exactly the Memory bridge, with no probe. */
   connectors?:
@@ -72,6 +79,20 @@ export function staticKey(token: string): KeySource {
 /** How many times a probe that could not reach Eragon is tried again (once a minute). */
 export const CAPABILITY_RETRIES = 10;
 
+/** How many held Memory save ids a session remembers; an older one is still found after the connector route's not_found. */
+export const HELD_SAVES_MAX = 256;
+
+/** The promise's value, or `fallback` once `ms` have passed. */
+async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  if (ms <= 0) return fallback;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([promise, new Promise<T>((resolve) => (timer = setTimeout(() => resolve(fallback), ms)))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Whether this key gets Connections, as the session should list them.
  * The probe starts with the bridge; the first tools/list waits for it at most
@@ -79,6 +100,10 @@ export const CAPABILITY_RETRIES = 10;
  * Only a probe that had a key and could not reach Eragon is retried in the
  * background: a key command that failed runs again only when a tool call
  * asks for the key, so a locked keychain is not prompted every minute.
+ *
+ * Every change to what it would list (the cache read once the key is known,
+ * each answer) is reported through `onChange`; the server compares it with
+ * what the client last listed, so no change is lost between snapshots.
  */
 class ConnectorAvailability {
   private outcome: ProbeOutcome | undefined;
@@ -92,20 +117,32 @@ class ConnectorAvailability {
   private started = 0;
   private applied = 0;
   private probing = false;
+  /** Whose key the cached entry is (SHA-256): it may have been read by key source before the key was known. */
+  private cachedFor: string | undefined;
+  private rechecking: Promise<boolean> | undefined;
 
   constructor(
     private readonly options: {
       gatewayUrl: string;
       key: KeySource;
+      keySource: string | undefined;
       fetchImpl: typeof fetch | undefined;
       cache: CapabilityCache | undefined;
       probeWaitMs: number;
       retryMs: number;
       now: () => number;
-      onChange: () => void;
+      /** Whether it would now list Connections; called after every change that may alter that. */
+      onChange: (connectors: boolean) => void;
     },
   ) {
     this.deadline = options.now() + options.probeWaitMs;
+    if (options.keySource !== undefined) {
+      const hit = options.cache?.readBySource(options.keySource, options.gatewayUrl);
+      if (hit !== undefined) {
+        this.cached = hit.capabilities;
+        this.cachedFor = hit.keyHash;
+      }
+    }
     this.firstSettled = this.probe().then(() => undefined);
   }
 
@@ -154,15 +191,21 @@ class ConnectorAvailability {
    * the 404 meant: true when it confirms this key has no Connections now
    * (the cache entry is forgotten and the client told), false otherwise.
    */
-  async recheck(): Promise<boolean> {
-    return (await this.probe()).kind === "none";
+  async recheck(remainingMs: number): Promise<boolean> {
+    // Refusals at the same moment share one probe; each waits only as long as its own call may.
+    this.rechecking ??= this.probe(remainingMs)
+      .then((outcome) => outcome.kind === "none")
+      .finally(() => {
+        this.rechecking = undefined;
+      });
+    return within(this.rechecking, remainingMs, false);
   }
 
   stop(): void {
     clearTimeout(this.retry);
   }
 
-  private async probe(): Promise<ProbeOutcome> {
+  private async probe(timeoutMs?: number): Promise<ProbeOutcome> {
     const sequence = ++this.started;
     this.probing = true;
     try {
@@ -172,10 +215,11 @@ class ConnectorAvailability {
         return { kind: "unreachable" };
       }
       this.token = key.token;
-      if (this.cached === undefined) this.cached = this.options.cache?.read(key.token, this.options.gatewayUrl);
+      this.adoptKey(key.token);
       const outcome = await probeCapabilities({
         gatewayUrl: this.options.gatewayUrl,
         token: key.token,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(this.options.fetchImpl === undefined ? {} : { fetchImpl: this.options.fetchImpl }),
       });
       this.apply(sequence, outcome, key.token);
@@ -185,15 +229,25 @@ class ConnectorAvailability {
     }
   }
 
+  /** The key is known: the cached entry stands only if it is this key's (the key command may print another key now). */
+  private adoptKey(token: string): void {
+    const hash = CapabilityCache.keyHash(token);
+    if (this.cachedFor === hash) return;
+    this.cachedFor = hash;
+    this.cached = this.options.cache?.read(token, this.options.gatewayUrl);
+    this.options.onChange(this.capabilities() !== undefined);
+  }
+
   private apply(sequence: number, outcome: ProbeOutcome, token: string | undefined): void {
     // An answer older than one already taken (the slow first probe after a recheck) changes nothing.
     if (sequence < this.applied) return;
-    const before = toolNames(this.capabilities());
     if (outcome.kind !== "unreachable") {
       this.applied = sequence;
       this.outcome = outcome;
       clearTimeout(this.retry);
-      if (token !== undefined && outcome.kind === "available") this.options.cache?.write(token, this.options.gatewayUrl, outcome.capabilities);
+      if (token !== undefined && outcome.kind === "available") {
+        this.options.cache?.write(token, this.options.gatewayUrl, outcome.capabilities, this.options.keySource);
+      }
       if (token !== undefined && outcome.kind === "none") this.options.cache?.remove(token, this.options.gatewayUrl);
     } else {
       if (this.outcome === undefined) this.outcome = outcome;
@@ -204,12 +258,8 @@ class ConnectorAvailability {
         this.retry.unref?.();
       }
     }
-    if (toolNames(this.capabilities()) !== before) this.options.onChange();
+    this.options.onChange(this.capabilities() !== undefined);
   }
-}
-
-function toolNames(capabilities: Capabilities | undefined): string {
-  return capabilities === undefined ? "" : CONNECTOR_TOOLS.map((tool) => tool.name).join(",");
 }
 
 /**
@@ -230,8 +280,19 @@ export function createBridgeServer(options: BridgeOptions): Server {
   );
 
   let listed: { connectors: boolean } | undefined;
+  /** What the client was last told, by listing or by a list_changed since. */
+  let shown: boolean | undefined;
   /** Memory saves Eragon held for confirmation in this session: connector_call_status reads them from the Memory save route. */
   const heldSaves = new Set<string>();
+  const holdSave = (id: string) => {
+    heldSaves.delete(id);
+    heldSaves.add(id);
+    // The oldest goes first; connector_call_status still finds it after the connector route's not_found.
+    for (const oldest of heldSaves) {
+      if (heldSaves.size <= HELD_SAVES_MAX) break;
+      heldSaves.delete(oldest);
+    }
+  };
   let noteGiven = false;
   let availability: ConnectorAvailability | undefined;
   if (options.connectors !== false && options.connectors !== undefined) {
@@ -241,15 +302,18 @@ export function createBridgeServer(options: BridgeOptions): Server {
     availability = new ConnectorAvailability({
       gatewayUrl: options.gatewayUrl,
       key: options.key,
+      keySource: options.keySource,
       fetchImpl: options.fetchImpl,
       cache: cacheFile === null ? undefined : new CapabilityCache(cacheFile, now),
       probeWaitMs: settings.probeWaitMs ?? CAPABILITY_PROBE_WAIT_MS,
       retryMs: settings.retryMs ?? CAPABILITY_RETRY_MS,
       now,
-      onChange: () => {
-        settings.onToolsChanged?.();
+      onChange: (connectors) => {
         // Only a client that has listed needs telling; one that has not will list the new set.
-        if (listed !== undefined) server.sendToolListChanged().catch(() => undefined);
+        if (shown === undefined || shown === connectors) return;
+        shown = connectors;
+        settings.onToolsChanged?.();
+        server.sendToolListChanged().catch(() => undefined);
       },
     });
     const stop = availability;
@@ -263,16 +327,25 @@ export function createBridgeServer(options: BridgeOptions): Server {
       if (availability.capabilities() !== undefined) tools = [...MEMORY_TOOLS, ...CONNECTOR_TOOLS];
     }
     listed = { connectors: tools !== MEMORY_TOOLS };
+    shown = listed.connectors;
     return { tools };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
     const name = request.params.name;
     const args = request.params.arguments ?? {};
-    const key = await options.key();
-    if (key.ok) availability?.keyRead();
     if (availability !== undefined && CONNECTOR_TOOL_NAMES.has(name)) {
+      // One deadline for the whole call: the key, every request, and a recheck (ERA-5056 review).
+      const deadline = Date.now() + GATEWAY_FETCH_TIMEOUT_MS;
+      const key = await within<KeyResult | undefined>(options.key(), GATEWAY_FETCH_TIMEOUT_MS, undefined);
+      if (key === undefined) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: `The key command did not print a key within ${GATEWAY_FETCH_TIMEOUT_MS / 1000} s, so nothing was sent. Try again.` }],
+        };
+      }
       if (!key.ok) return { isError: true, content: [{ type: "text", text: key.error }] };
+      availability.keyRead();
       const known = availability;
       return callConnectorTool(name, args, {
         gatewayUrl: options.gatewayUrl,
@@ -281,15 +354,19 @@ export function createBridgeServer(options: BridgeOptions): Server {
         known: (toolId) => known.known(toolId),
         learn: (tools) => known.learn(tools),
         isMemorySave: (id) => heldSaves.has(id),
-        confirmUnavailable: () => known.recheck(),
+        confirmUnavailable: (remainingMs) => known.recheck(remainingMs),
+        deadline,
+        budgetMs: GATEWAY_FETCH_TIMEOUT_MS,
       });
     }
+    const key = await options.key();
+    if (key.ok) availability?.keyRead();
     if (!key.ok) return { isError: true, content: [{ type: "text", text: key.error }] };
     const config: MemoryToolConfig = {
       gatewayUrl: options.gatewayUrl,
       token: key.token,
       ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-      onHeld: (id) => heldSaves.add(id),
+      onHeld: holdSave,
     };
     const result = await callMemoryTool(name, args, config, fallbackIdempotencyKey(sessionId, extra.requestId));
     // The session listed Memory alone and Connections have answered since: say a restart loads them, once.
@@ -317,7 +394,7 @@ export function createMemoryMcpServer(config: MemoryToolConfig): Server {
   });
 }
 
-export async function runBridge(options: { gatewayUrl: string; key: KeySource }): Promise<void> {
+export async function runBridge(options: { gatewayUrl: string; key: KeySource; keySource?: string }): Promise<void> {
   await createBridgeServer({ ...options, connectors: {} }).connect(new StdioServerTransport());
 }
 

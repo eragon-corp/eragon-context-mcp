@@ -31,7 +31,10 @@ export declare function loadConfig(argv: string[], environment?: NodeJS.ProcessE
  * older Codex) must not be spent on a keychain prompt, and the first
  * tools/list already waits at most 5 s. A command that fails is run again by
  * the next tool call, so Memory works once the key can be read (an unlocked
- * keychain), and its tools are listed all along. A missing URL, or no key and
+ * keychain), and its tools are listed all along. The command (not the key)
+ * also names the capabilities cache entry the last run read, so a restart
+ * whose command is slower than 5 s still lists Connections at once; the key it
+ * prints is checked against that entry when it comes. A missing URL, or no key and
  * no command, still stops the bridge at once with the same message as before.
  */
 export declare function prepareBridge(argv: string[], environment?: NodeJS.ProcessEnv, options?: {
@@ -41,6 +44,7 @@ export declare function prepareBridge(argv: string[], environment?: NodeJS.Proce
     ok: true;
     gatewayUrl: string;
     key: KeySource;
+    keySource?: string;
 } | {
     ok: false;
     error: string;

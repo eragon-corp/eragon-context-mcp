@@ -213,7 +213,12 @@ describe("GET /v1/connectors/calls/:id (E:59-63) and GET /v1/memory/saves/:id (E
     const { fetchImpl, requests } = gateway({ "GET /v1/connectors/calls/gwa_9": { status: 200, body: { approval: NOT_RUN_RECEIPT } } });
     const result = await callConnectorTool("connector_call_status", { approval_id: "gwa_9" }, ctx(fetchImpl));
     expect(requests).toEqual([{ method: "GET", path: "/v1/connectors/calls/gwa_9", body: undefined }]);
-    expect(text(result)).toBe("Approval id: gwa_9. It was not sent. Reason: contract_drift: the reviewed contract changed at the provider.");
+    // The reason is quoted after the framing (gateway-connectors.ts S:475 puts the provider's own error message there).
+    expect(text(result)).toBe(
+      "Approval id: gwa_9. It was not sent.\n\n" +
+        `${CONNECTOR_RESULT_FRAMING}\nProvenance: {"source":"third_party","app":"slack","tool":"slack.post_message"}\n\n` +
+        JSON.stringify({ reason: "contract_drift: the reviewed contract changed at the provider" }, null, 2),
+    );
   });
 
   it("reads a held Memory save from its own route, by the id this session filed", async () => {

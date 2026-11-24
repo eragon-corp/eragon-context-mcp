@@ -1,9 +1,12 @@
 import { VERSION } from "./version.js";
 
 /**
- * Every Gateway request is abandoned after this long (ERA-5056). Codex gives a
- * tool call 60 s by default, so the agent gets the bridge's own answer, which
- * says what to do next, before the client gives up on the call.
+ * A connector tool call, key and every request included, is abandoned after
+ * this long (ERA-5056). Codex gives a tool call 60 s by default, so the agent
+ * gets the bridge's own answer, which says what to do next, before the
+ * client gives up on the call. Memory requests keep the base bridge's
+ * behaviour and have no bridge deadline: a save that answers late still
+ * returns its receipt.
  */
 export const GATEWAY_FETCH_TIMEOUT_MS = 45_000;
 
@@ -22,6 +25,7 @@ export type GatewayRequest = {
   method?: "GET" | "POST";
   body?: unknown;
   fetchImpl?: typeof fetch;
+  /** Abandon the request after this long; none when omitted (the Memory requests). */
   timeoutMs?: number;
 };
 
@@ -40,11 +44,12 @@ export async function requestGateway({
   method = "POST",
   body,
   fetchImpl = fetch,
-  timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
+  timeoutMs,
 }: GatewayRequest): Promise<GatewayResponse> {
   const base = gatewayUrl.replace(/\/+$/, "");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new GatewayTimeoutError(timeoutMs)), timeoutMs);
+  if (timeoutMs !== undefined && timeoutMs <= 0) throw new GatewayTimeoutError(0);
+  const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new GatewayTimeoutError(timeoutMs)), timeoutMs);
   try {
     const headers: Record<string, string> = {
       accept: "application/json",
@@ -57,7 +62,7 @@ export async function requestGateway({
       headers,
       ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
       redirect: "manual",
-      signal: controller.signal,
+      ...(timer === undefined ? {} : { signal: controller.signal }),
     });
     const text = await response.text();
     const retryAfter = Number(response.headers?.get?.("retry-after") ?? Number.NaN);
@@ -70,7 +75,7 @@ export async function requestGateway({
     }
   } catch (error) {
     // A fetch that honours the signal rejects with its reason or an AbortError; either is the deadline.
-    if (controller.signal.aborted) throw new GatewayTimeoutError(timeoutMs);
+    if (controller.signal.aborted) throw new GatewayTimeoutError(timeoutMs ?? 0);
     throw error;
   } finally {
     clearTimeout(timer);

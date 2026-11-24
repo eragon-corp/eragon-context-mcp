@@ -35,14 +35,25 @@ export type ConnectorToolContext = {
      * The Gateway answered as if this key has no Connections (an unknown-path
      * 404, or `workspace_off`): whether a fresh capabilities answer confirms it.
      */
-    confirmUnavailable?: () => Promise<boolean>;
-    /** For a test: the Gateway deadline. */
-    timeoutMs?: number;
+    confirmUnavailable?: (remainingMs: number) => Promise<boolean>;
+    /**
+     * When this tool call must have answered (epoch ms): one deadline across
+     * the key, every request, and any capabilities recheck (ERA-5056 review).
+     * By default `budgetMs` from when the call starts.
+     */
+    deadline?: number;
+    /** The whole call's budget, as the timeout answer states it; GATEWAY_FETCH_TIMEOUT_MS by default. */
+    budgetMs?: number;
 };
 /**
  * A receipt (`ConnectorReceipt`: id, tool, toolId, status, outcome,
  * description, expiresAt, reviewPath, and a result while the key may see it)
- * as the agent reads it. A write's result came from the app, so it is framed.
+ * as the agent reads it. The first paragraph is Eragon's own words: the id,
+ * what the status means, where the user reviews it. Everything else is
+ * quoted after the framing sentence (ERA-5056 review): the description
+ * repeats the app's connection label and the write's arguments, a failed
+ * receipt's reason is the provider's own error message
+ * (gateway-connectors.ts `dispatch`), and a result came from the app.
  */
 export declare function receiptText(receipt: Record<string, unknown>, gatewayUrl: string): string;
 export declare function callConnectorTool(name: string, args: Record<string, unknown>, context: ConnectorToolContext): Promise<CallToolResult>;

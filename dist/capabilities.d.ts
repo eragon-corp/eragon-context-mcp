@@ -48,21 +48,37 @@ export declare function probeCapabilities(config: {
     gatewayUrl: string;
     token: string;
     fetchImpl?: typeof fetch;
+    /** A recheck inside a tool call passes what is left of that call's deadline. */
+    timeoutMs?: number;
 }): Promise<ProbeOutcome>;
 export declare function defaultCapabilityCacheFile(): string;
 /**
  * The last capabilities answer per key and Gateway origin, so a slow start
  * still lists Connections the key had yesterday. An entry is named by the
- * key's SHA-256 and the origin: the file never holds the key. Any problem
- * reading or writing it is treated as an empty cache.
+ * key's SHA-256 and the origin: the file never holds the key. A key that a
+ * key command prints is also indexed by the command's SHA-256, so a restart
+ * finds its entry before the command has finished (ERA-5056 review: a key
+ * command slower than the first list otherwise never lists Connections). The
+ * file never holds the command either. Any problem reading or writing it is
+ * treated as an empty cache.
  */
 export declare class CapabilityCache {
     private readonly file;
     private readonly now;
     constructor(file: string, now?: () => number);
     static entryName(token: string, gatewayUrl: string): string;
+    static keyHash(token: string): string;
+    private static entryNameOfHash;
+    private static sourceName;
+    private fresh;
     read(token: string, gatewayUrl: string): Capabilities | undefined;
-    write(token: string, gatewayUrl: string, capabilities: Capabilities): void;
+    /** The entry the key source last read, before its key is known; the caller checks the key once it is. */
+    readBySource(source: string, gatewayUrl: string): {
+        keyHash: string;
+        capabilities: Capabilities;
+    } | undefined;
+    private readHash;
+    write(token: string, gatewayUrl: string, capabilities: Capabilities, source?: string): void;
     remove(token: string, gatewayUrl: string): void;
     private load;
     private save;

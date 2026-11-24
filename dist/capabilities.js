@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { requestGateway } from "./client.js";
+import { GATEWAY_FETCH_TIMEOUT_MS, requestGateway } from "./client.js";
 /**
  * How long the first tools/list waits for the capabilities probe (ERA-5056).
  * Codex 0.170 lists an MCP server's tools once, inside its start-up timeout
@@ -41,6 +41,7 @@ export async function probeCapabilities(config) {
             token: config.token,
             path: CAPABILITIES_PATH,
             method: "GET",
+            timeoutMs: config.timeoutMs ?? GATEWAY_FETCH_TIMEOUT_MS,
             ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
         });
         // A rate limit or an outage is no answer: ask again later, and let the cache stand in.
@@ -58,11 +59,16 @@ export async function probeCapabilities(config) {
 export function defaultCapabilityCacheFile() {
     return join(homedir(), ".eragon", "bridge-capabilities.json");
 }
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 /**
  * The last capabilities answer per key and Gateway origin, so a slow start
  * still lists Connections the key had yesterday. An entry is named by the
- * key's SHA-256 and the origin: the file never holds the key. Any problem
- * reading or writing it is treated as an empty cache.
+ * key's SHA-256 and the origin: the file never holds the key. A key that a
+ * key command prints is also indexed by the command's SHA-256, so a restart
+ * finds its entry before the command has finished (ERA-5056 review: a key
+ * command slower than the first list otherwise never lists Connections). The
+ * file never holds the command either. Any problem reading or writing it is
+ * treated as an empty cache.
  */
 export class CapabilityCache {
     file;
@@ -72,18 +78,43 @@ export class CapabilityCache {
         this.now = now;
     }
     static entryName(token, gatewayUrl) {
-        return `${createHash("sha256").update(token).digest("hex")}@${new URL(gatewayUrl).origin}`;
+        return CapabilityCache.entryNameOfHash(sha256(token), gatewayUrl);
+    }
+    static keyHash(token) {
+        return sha256(token);
+    }
+    static entryNameOfHash(keyHash, gatewayUrl) {
+        return `${keyHash}@${new URL(gatewayUrl).origin}`;
+    }
+    static sourceName(source, gatewayUrl) {
+        return `${sha256(source)}@${new URL(gatewayUrl).origin}`;
+    }
+    fresh(savedAt) {
+        return this.now() - savedAt < CAPABILITY_CACHE_TTL_MS && savedAt <= this.now();
     }
     read(token, gatewayUrl) {
-        const entry = this.load().entries[CapabilityCache.entryName(token, gatewayUrl)];
-        if (entry === undefined || !(this.now() - entry.savedAt < CAPABILITY_CACHE_TTL_MS) || entry.savedAt > this.now()) {
+        return this.readHash(CapabilityCache.keyHash(token), gatewayUrl);
+    }
+    /** The entry the key source last read, before its key is known; the caller checks the key once it is. */
+    readBySource(source, gatewayUrl) {
+        const pointer = this.load().sources?.[CapabilityCache.sourceName(source, gatewayUrl)];
+        if (pointer === undefined || !this.fresh(pointer.savedAt))
             return undefined;
-        }
+        const capabilities = this.readHash(pointer.keyHash, gatewayUrl);
+        return capabilities === undefined ? undefined : { keyHash: pointer.keyHash, capabilities };
+    }
+    readHash(keyHash, gatewayUrl) {
+        const entry = this.load().entries[CapabilityCache.entryNameOfHash(keyHash, gatewayUrl)];
+        if (entry === undefined || !this.fresh(entry.savedAt))
+            return undefined;
         return parseCapabilities(entry.capabilities);
     }
-    write(token, gatewayUrl, capabilities) {
+    write(token, gatewayUrl, capabilities, source) {
         const cache = this.load();
         cache.entries[CapabilityCache.entryName(token, gatewayUrl)] = { savedAt: this.now(), capabilities };
+        if (source !== undefined) {
+            cache.sources = { ...cache.sources, [CapabilityCache.sourceName(source, gatewayUrl)]: { savedAt: this.now(), keyHash: CapabilityCache.keyHash(token) } };
+        }
         this.save(cache);
     }
     remove(token, gatewayUrl) {
@@ -104,7 +135,13 @@ export class CapabilityCache {
                         entries[name] = { savedAt: entry.savedAt, capabilities: entry.capabilities };
                     }
                 }
-                return { version: 1, entries };
+                const sources = {};
+                for (const [name, pointer] of Object.entries(isRecord(parsed.sources) ? parsed.sources : {})) {
+                    if (isRecord(pointer) && typeof pointer.savedAt === "number" && typeof pointer.keyHash === "string") {
+                        sources[name] = { savedAt: pointer.savedAt, keyHash: pointer.keyHash };
+                    }
+                }
+                return { version: 1, entries, sources };
             }
         }
         catch {
@@ -117,6 +154,10 @@ export class CapabilityCache {
         for (const [name, entry] of Object.entries(cache.entries)) {
             if (!(now - entry.savedAt < CAPABILITY_CACHE_TTL_MS))
                 delete cache.entries[name];
+        }
+        for (const [name, pointer] of Object.entries(cache.sources ?? {})) {
+            if (!(now - pointer.savedAt < CAPABILITY_CACHE_TTL_MS))
+                delete cache.sources[name];
         }
         try {
             mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });

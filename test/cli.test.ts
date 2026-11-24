@@ -309,8 +309,13 @@ describe("prepareBridge: a key command never holds the bridge's start, and its f
     const prepared = prepareBridge(["--url", GW, "--key-command", command], { ...PATH_ONLY, ERAGON_API_KEY: "esk_env" });
     if (!prepared.ok) throw new Error(prepared.error);
     expect(await prepared.key()).toEqual({ ok: true, token: "esk_env" });
+    // A key given outright needs no cache index by source.
+    expect(prepared.keySource).toBeUndefined();
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(existsSync(marker)).toBe(false);
+    // A key command names the cache entry its last run read, so a restart lists Connections before it prints (ERA-5056 review).
+    const viaCommand = prepareBridge(["--url", GW, "--key-command", command], PATH_ONLY);
+    expect(viaCommand.ok && viaCommand.keySource).toBe(`command:${command}`);
     const refused = prepareBridge(["--url", GW], PATH_ONLY);
     expect(refused.ok).toBe(false);
     if (!refused.ok) expect(refused.error).toContain("Set ERAGON_API_KEY");

@@ -108,7 +108,10 @@ export async function loadConfig(argv, environment = process.env, options = {}) 
  * older Codex) must not be spent on a keychain prompt, and the first
  * tools/list already waits at most 5 s. A command that fails is run again by
  * the next tool call, so Memory works once the key can be read (an unlocked
- * keychain), and its tools are listed all along. A missing URL, or no key and
+ * keychain), and its tools are listed all along. The command (not the key)
+ * also names the capabilities cache entry the last run read, so a restart
+ * whose command is slower than 5 s still lists Connections at once; the key it
+ * prints is checked against that entry when it comes. A missing URL, or no key and
  * no command, still stops the bridge at once with the same message as before.
  */
 export function prepareBridge(argv, environment = process.env, options = {}) {
@@ -142,7 +145,8 @@ export function prepareBridge(argv, environment = process.env, options = {}) {
         return running;
     };
     // The bridge's capabilities probe asks for the key as it starts, so the command runs then.
-    return { ok: true, gatewayUrl, key };
+    // keySource names the command so a restart finds its cached Connections before it prints; only a hash is stored.
+    return { ok: true, gatewayUrl, key, keySource: `command:${command.trim()}` };
 }
 /**
  * Runs a key command through the shell, as Claude Code runs `apiKeyHelper`,
@@ -285,7 +289,7 @@ export async function main(argv = process.argv.slice(2)) {
         console.error(prepared.error);
         return 1;
     }
-    await runBridge(prepared);
+    await runBridge({ gatewayUrl: prepared.gatewayUrl, key: prepared.key, ...(prepared.keySource === undefined ? {} : { keySource: prepared.keySource }) });
     return 0;
 }
 //# sourceMappingURL=cli.js.map
