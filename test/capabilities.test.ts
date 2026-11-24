@@ -23,14 +23,11 @@ const GW = "https://acme.s.eragon.ai/gw";
 const TOKEN = "esk_test_token_0123456789";
 const MEMORY_NAMES = ["memory_search", "memory_save", "memory_share"];
 const CONNECTOR_NAMES = ["connector_tools", "connector_call", "connector_call_status", "connector_request_auth"];
-const CAPABILITIES: Capabilities = {
-  version: 1,
-  apps: ["slack"],
-  tools: [
-    { id: "slack.search_messages", app: "slack", effect: "read" },
-    { id: "slack.post_message", app: "slack", effect: "write" },
-  ],
-};
+const TOOL_IDS = ["slack.search_messages", "slack.list_channels", "slack.conversation_history", "slack.post_message"];
+/** What the bridge keeps of an answer. */
+const CAPABILITIES: Capabilities = { version: 1, apps: ["slack"], tools: TOOL_IDS };
+/** What the Gateway answers (test/contract.test.ts cites the server's own shape). */
+const ANSWER = { version: 1, workspace: true, apps: ["slack"], tools: TOOL_IDS };
 /** What today's Gateway answers for a path it does not have (`plugin.ts` unknownGatewayRoute). */
 const UNKNOWN_PATH = { type: "error", error: { type: "not_found_error", message: "unknown gateway path" } };
 
@@ -99,7 +96,7 @@ afterEach(() => {
 
 describe("the first tools/list and the capabilities probe", () => {
   it("first tools/list waits for a probe answering in 1 s and includes connector tools", async () => {
-    const { fetchImpl, calls } = gateway({ delayMs: 1_000, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl, calls } = gateway({ delayMs: 1_000, answer: () => json(200, ANSWER) });
     const { client } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
 
     const listed = await listAt(client, 6_000);
@@ -111,7 +108,7 @@ describe("the first tools/list and the capabilities probe", () => {
   });
 
   it("probe slower than 5 s → Memory tools only, initialize answered < 100 ms", async () => {
-    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, ANSWER) });
     const { client, initializeMs } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
 
     expect(initializeMs).toBeLessThan(100);
@@ -125,8 +122,10 @@ describe("the first tools/list and the capabilities probe", () => {
   it("probe 404/incompatible → Memory tools only", async () => {
     const answers = [
       () => json(404, UNKNOWN_PATH),
-      () => json(200, { ...CAPABILITIES, version: 2 }),
-      () => json(200, { version: 1, apps: [] }),
+      () => json(200, { ...ANSWER, version: 2 }),
+      () => json(200, { version: 1, workspace: false, apps: ["slack"], tools: [] }),
+      () => json(200, { version: 1, workspace: false, apps: [], tools: [] }),
+      () => json(200, { version: 1, workspace: true, apps: ["slack"], tools: [] }),
       () => new Response("<html>not json</html>", { status: 200 }),
       () => json(401, { error: { message: "invalid key" } }),
     ];
@@ -166,7 +165,7 @@ describe("the first tools/list and the capabilities probe", () => {
 
   it("a key command slower than 5 s cannot hold the first tools/list: Memory is listed at 5 s", async () => {
     const neverReads: KeySource = () => new Promise(() => undefined);
-    const { fetchImpl, calls } = gateway({ answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl, calls } = gateway({ answer: () => json(200, ANSWER) });
     const { client, initializeMs } = await connect({ gatewayUrl: GW, key: neverReads, fetchImpl, connectors: { cacheFile: null } });
 
     expect(initializeMs).toBeLessThan(100);
@@ -222,7 +221,7 @@ describe("against today's Gateway, with no capabilities endpoint", () => {
 
 describe("Connections that answer after the first list", () => {
   it("sends tools/list_changed, and the first Memory result then says a restart loads them, once", async () => {
-    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, ANSWER) });
     const { client, changes } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
     expect((await listAt(client, 5_000)).names).toEqual(MEMORY_NAMES);
 
@@ -239,7 +238,7 @@ describe("Connections that answer after the first list", () => {
   });
 
   it("a client that lists again after list_changed gets the connector tools and no note", async () => {
-    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl } = gateway({ delayMs: 8_000, answer: () => json(200, ANSWER) });
     const { client } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
     await listAt(client, 5_000);
     await vi.advanceTimersByTimeAsync(3_000);
@@ -250,13 +249,32 @@ describe("Connections that answer after the first list", () => {
     await client.close();
   });
 
+  it("a probe answered 429 is no answer: the cache stands in and it is asked again", async () => {
+    const cacheFile = join(dir, "bridge-capabilities.json");
+    new CapabilityCache(cacheFile).write(TOKEN, GW, CAPABILITIES);
+    let probes = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      if (!String(input).endsWith("/capabilities")) return json(404, UNKNOWN_PATH);
+      probes += 1;
+      return probes === 1
+        ? new Response(JSON.stringify({ error: { code: "rate_limited", message: "too many connector requests; wait and try again" } }), { status: 429, headers: { "retry-after": "30" } })
+        : json(200, ANSWER);
+    });
+    const { client } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile } });
+    expect((await listAt(client, 100)).names).toEqual([...MEMORY_NAMES, ...CONNECTOR_NAMES]);
+    expect(new CapabilityCache(cacheFile).read(TOKEN, GW)).toEqual(CAPABILITIES);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(probes).toBe(2);
+    await client.close();
+  });
+
   it("a probe that could not reach Eragon is tried again a minute later", async () => {
     let attempt = 0;
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       if (!String(input).endsWith("/capabilities")) return json(404, UNKNOWN_PATH);
       attempt += 1;
       if (attempt === 1) throw new TypeError("fetch failed");
-      return json(200, CAPABILITIES);
+      return json(200, ANSWER);
     });
     const { client, changes } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
     expect((await listAt(client, 5_000)).names).toEqual(MEMORY_NAMES);
@@ -282,6 +300,37 @@ describe("Connections that answer after the first list", () => {
   });
 });
 
+describe("through the MCP server", () => {
+  it("connector_tools teaches a write, so connector_call refuses it without request_id; a held save's status is read from its own route", async () => {
+    vi.useRealTimers();
+    const paths: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const path = new URL(String(input)).pathname.replace(/^\/gw/, "");
+      paths.push(`${String(init?.method)} ${path}`);
+      if (path === "/v1/connectors/capabilities") return json(200, ANSWER);
+      if (path === "/v1/connectors/tools") return json(200, { tools: [{ toolId: "slack.post_message", app: "slack", effect: "write", state: "ready" }] });
+      if (path === "/v1/memory") return json(202, { approval: { id: "gwa_save", tool: "memory_save", status: "pending", reviewPath: "/inbox" } });
+      if (path === "/v1/memory/saves/gwa_save") return json(200, { approval: { id: "gwa_save", tool: "memory_save", status: "executed", outcome: "executed" } });
+      return json(404, UNKNOWN_PATH);
+    });
+    const { client } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile: null } });
+    await client.listTools();
+    await client.callTool({ name: "connector_tools", arguments: {} });
+    const refused = await client.callTool({ name: "connector_call", arguments: { tool: "slack.post_message", arguments: { channel: "#general", text: "hi" } } });
+    expect(refused.isError).toBe(true);
+    await client.callTool({ name: "memory_save", arguments: { kind: "fact", title: "t", content: "c" } });
+    const status = await client.callTool({ name: "connector_call_status", arguments: { approval_id: "gwa_save" } });
+    expect((status.content as { text: string }[])[0]?.text).toBe("Approval id: gwa_save. It was saved.");
+    expect(paths).toEqual([
+      "GET /v1/connectors/capabilities",
+      "GET /v1/connectors/tools",
+      "POST /v1/memory",
+      "GET /v1/memory/saves/gwa_save",
+    ]);
+    await client.close();
+  });
+});
+
 describe("a key command that failed at start", () => {
   it("is not run again in the background; the next tool call's key starts the probe, and Connections follow", async () => {
     let reads = 0;
@@ -289,7 +338,7 @@ describe("a key command that failed at start", () => {
       reads += 1;
       return reads === 1 ? { ok: false, error: "The key command failed (exit 1)." } : { ok: true, token: TOKEN };
     };
-    const { fetchImpl, calls } = gateway({ delayMs: 10, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl, calls } = gateway({ delayMs: 10, answer: () => json(200, ANSWER) });
     const { client, changes } = await connect({ gatewayUrl: GW, key, fetchImpl, connectors: { cacheFile: null } });
     expect((await listAt(client, 100)).names).toEqual(MEMORY_NAMES);
     await vi.advanceTimersByTimeAsync(10 * 60_000);
@@ -330,18 +379,18 @@ describe("the cache says yes, Eragon says no", () => {
     await client.close();
   });
 
-  it("a 404 on a call while Eragon still offers Connections keeps the tools and the cache", async () => {
+  it("a coded 404 (unknown_tool) keeps the tools and the cache: only an unknown path means Connections are off", async () => {
     const cacheFile = join(dir, "bridge-capabilities.json");
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
-      if (String(input).endsWith("/capabilities")) return json(200, CAPABILITIES);
-      return json(404, { error: { message: "No such tool: slack.nope" } });
+      if (String(input).endsWith("/capabilities")) return json(200, ANSWER);
+      return json(404, { error: { code: "unknown_tool", message: "slack.nope is not a reviewed connector tool" } });
     });
     const { client, changes } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile } });
     expect((await listAt(client, 100)).names).toContain("connector_call");
 
-    const result = await client.callTool({ name: "connector_call", arguments: { tool_id: "slack.nope" } });
+    const result = await client.callTool({ name: "connector_call", arguments: { tool: "slack.nope" } });
 
-    expect((result.content as { text: string }[])[0]?.text).toBe("No such tool: slack.nope");
+    expect((result.content as { text: string }[])[0]?.text).toBe("slack.nope is not a reviewed connector tool.");
     expect(changes).toEqual([]);
     expect(new CapabilityCache(cacheFile).read(TOKEN, GW)).toEqual(CAPABILITIES);
     expect((await listAt(client, 0)).names).toContain("connector_call");
@@ -363,7 +412,7 @@ describe("the cache says yes, Eragon says no", () => {
 describe("the capabilities cache file", () => {
   it("names entries by the key's SHA-256 and the Gateway origin, never holds the key, and is private", async () => {
     const cacheFile = join(dir, "nested", "bridge-capabilities.json");
-    const { fetchImpl } = gateway({ delayMs: 10, answer: () => json(200, CAPABILITIES) });
+    const { fetchImpl } = gateway({ delayMs: 10, answer: () => json(200, ANSWER) });
     const { client } = await connect({ gatewayUrl: GW, key: staticKey(TOKEN), fetchImpl, connectors: { cacheFile } });
     await listAt(client, 100);
 

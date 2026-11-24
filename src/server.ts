@@ -11,10 +11,9 @@ import {
   defaultCapabilityCacheFile,
   probeCapabilities,
   type Capabilities,
-  type ConnectorEffect,
   type ProbeOutcome,
 } from "./capabilities.js";
-import { callConnectorTool, CONNECTOR_TOOL_NAMES, CONNECTOR_TOOLS } from "./connector-tools.js";
+import { callConnectorTool, CONNECTOR_TOOL_NAMES, CONNECTOR_TOOLS, type LearnedTool } from "./connector-tools.js";
 import { callMemoryTool, MEMORY_TOOLS, type MemoryToolConfig } from "./memory-tools.js";
 import { VERSION } from "./version.js";
 
@@ -85,7 +84,7 @@ class ConnectorAvailability {
   private outcome: ProbeOutcome | undefined;
   private cached: Capabilities | undefined;
   private token: string | undefined;
-  private readonly effects = new Map<string, ConnectorEffect>();
+  private readonly learned = new Map<string, LearnedTool>();
   private readonly deadline: number;
   private readonly firstSettled: Promise<void>;
   private retry: NodeJS.Timeout | undefined;
@@ -136,14 +135,13 @@ class ConnectorAvailability {
     return this.outcome?.kind === "available";
   }
 
-  effectOf(toolId: string): ConnectorEffect | undefined {
-    const learned = this.effects.get(toolId);
-    if (learned !== undefined) return learned;
-    return this.capabilities()?.tools.find((tool) => tool.id === toolId)?.effect;
+  /** A tool's effect and app, from a connector_tools answer (capabilities name tools, not their effects). */
+  known(toolId: string): LearnedTool | undefined {
+    return this.learned.get(toolId);
   }
 
-  learn(tools: { id: string; effect: ConnectorEffect }[]): void {
-    for (const tool of tools) this.effects.set(tool.id, tool.effect);
+  learn(tools: LearnedTool[]): void {
+    for (const tool of tools) this.learned.set(tool.id, tool);
   }
 
   /** A tool call read the key: probe now if no probe ever had one (the key command failed at start). */
@@ -232,6 +230,8 @@ export function createBridgeServer(options: BridgeOptions): Server {
   );
 
   let listed: { connectors: boolean } | undefined;
+  /** Memory saves Eragon held for confirmation in this session: connector_call_status reads them from the Memory save route. */
+  const heldSaves = new Set<string>();
   let noteGiven = false;
   let availability: ConnectorAvailability | undefined;
   if (options.connectors !== false && options.connectors !== undefined) {
@@ -278,8 +278,9 @@ export function createBridgeServer(options: BridgeOptions): Server {
         gatewayUrl: options.gatewayUrl,
         token: key.token,
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-        effectOf: (toolId) => known.effectOf(toolId),
+        known: (toolId) => known.known(toolId),
         learn: (tools) => known.learn(tools),
+        isMemorySave: (id) => heldSaves.has(id),
         confirmUnavailable: () => known.recheck(),
       });
     }
@@ -288,6 +289,7 @@ export function createBridgeServer(options: BridgeOptions): Server {
       gatewayUrl: options.gatewayUrl,
       token: key.token,
       ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+      onHeld: (id) => heldSaves.add(id),
     };
     const result = await callMemoryTool(name, args, config, fallbackIdempotencyKey(sessionId, extra.requestId));
     // The session listed Memory alone and Connections have answered since: say a restart loads them, once.

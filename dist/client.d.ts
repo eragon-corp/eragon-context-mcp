@@ -7,6 +7,8 @@ export declare const GATEWAY_FETCH_TIMEOUT_MS = 45000;
 export type GatewayResponse = {
     status: number;
     body: unknown;
+    /** Seconds from a `retry-after` header (the Gateway's 429 and 503), when it sent one. */
+    retryAfterSeconds?: number;
 };
 export type GatewayRequest = {
     gatewayUrl: string;

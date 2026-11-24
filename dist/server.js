@@ -43,7 +43,7 @@ class ConnectorAvailability {
     outcome;
     cached;
     token;
-    effects = new Map();
+    learned = new Map();
     deadline;
     firstSettled;
     retry;
@@ -82,15 +82,13 @@ class ConnectorAvailability {
     get answeredAvailable() {
         return this.outcome?.kind === "available";
     }
-    effectOf(toolId) {
-        const learned = this.effects.get(toolId);
-        if (learned !== undefined)
-            return learned;
-        return this.capabilities()?.tools.find((tool) => tool.id === toolId)?.effect;
+    /** A tool's effect and app, from a connector_tools answer (capabilities name tools, not their effects). */
+    known(toolId) {
+        return this.learned.get(toolId);
     }
     learn(tools) {
         for (const tool of tools)
-            this.effects.set(tool.id, tool.effect);
+            this.learned.set(tool.id, tool);
     }
     /** A tool call read the key: probe now if no probe ever had one (the key command failed at start). */
     keyRead() {
@@ -178,6 +176,8 @@ export function createBridgeServer(options) {
         instructions: MEMORY_INSTRUCTIONS,
     });
     let listed;
+    /** Memory saves Eragon held for confirmation in this session: connector_call_status reads them from the Memory save route. */
+    const heldSaves = new Set();
     let noteGiven = false;
     let availability;
     if (options.connectors !== false && options.connectors !== undefined) {
@@ -226,8 +226,9 @@ export function createBridgeServer(options) {
                 gatewayUrl: options.gatewayUrl,
                 token: key.token,
                 ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-                effectOf: (toolId) => known.effectOf(toolId),
+                known: (toolId) => known.known(toolId),
                 learn: (tools) => known.learn(tools),
+                isMemorySave: (id) => heldSaves.has(id),
                 confirmUnavailable: () => known.recheck(),
             });
         }
@@ -237,6 +238,7 @@ export function createBridgeServer(options) {
             gatewayUrl: options.gatewayUrl,
             token: key.token,
             ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+            onHeld: (id) => heldSaves.add(id),
         };
         const result = await callMemoryTool(name, args, config, fallbackIdempotencyKey(sessionId, extra.requestId));
         // The session listed Memory alone and Connections have answered since: say a restart loads them, once.

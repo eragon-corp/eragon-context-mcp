@@ -33,13 +33,15 @@ export async function requestGateway({ gatewayUrl, token, path, method = "POST",
             signal: controller.signal,
         });
         const text = await response.text();
+        const retryAfter = Number(response.headers?.get?.("retry-after") ?? Number.NaN);
+        const extra = Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfterSeconds: retryAfter } : {};
         if (text === "")
-            return { status: response.status, body: null };
+            return { status: response.status, body: null, ...extra };
         try {
-            return { status: response.status, body: JSON.parse(text) };
+            return { status: response.status, body: JSON.parse(text), ...extra };
         }
         catch {
-            return { status: response.status, body: text };
+            return { status: response.status, body: text, ...extra };
         }
     }
     catch (error) {

@@ -10,6 +10,8 @@ export const GATEWAY_FETCH_TIMEOUT_MS = 45_000;
 export type GatewayResponse = {
   status: number;
   body: unknown;
+  /** Seconds from a `retry-after` header (the Gateway's 429 and 503), when it sent one. */
+  retryAfterSeconds?: number;
 };
 
 export type GatewayRequest = {
@@ -58,11 +60,13 @@ export async function requestGateway({
       signal: controller.signal,
     });
     const text = await response.text();
-    if (text === "") return { status: response.status, body: null };
+    const retryAfter = Number(response.headers?.get?.("retry-after") ?? Number.NaN);
+    const extra = Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfterSeconds: retryAfter } : {};
+    if (text === "") return { status: response.status, body: null, ...extra };
     try {
-      return { status: response.status, body: JSON.parse(text) as unknown };
+      return { status: response.status, body: JSON.parse(text) as unknown, ...extra };
     } catch {
-      return { status: response.status, body: text };
+      return { status: response.status, body: text, ...extra };
     }
   } catch (error) {
     // A fetch that honours the signal rejects with its reason or an AbortError; either is the deadline.

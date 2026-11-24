@@ -20,21 +20,18 @@ export const CAPABILITY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const CAPABILITIES_VERSION = 1;
 export const CAPABILITIES_PATH = "/v1/connectors/capabilities";
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-/** The capabilities answer, or undefined when it is not one this bridge understands. */
+const strings = (value) => Array.isArray(value) ? value.filter((item) => typeof item === "string" && item !== "") : [];
+/** The capabilities answer when it offers Connections, or undefined (off, empty, or not understood). */
 export function parseCapabilities(body) {
     if (!isRecord(body) || body.version !== CAPABILITIES_VERSION)
         return undefined;
-    const apps = Array.isArray(body.apps) ? body.apps.filter((app) => typeof app === "string" && app !== "") : [];
-    if (apps.length === 0)
+    // The server sends `workspace`; a cached entry has already been checked.
+    if ("workspace" in body && body.workspace !== true)
         return undefined;
-    const tools = [];
-    for (const tool of Array.isArray(body.tools) ? body.tools : []) {
-        if (!isRecord(tool) || typeof tool.id !== "string" || tool.id === "")
-            continue;
-        if (tool.effect !== "read" && tool.effect !== "write")
-            continue;
-        tools.push({ id: tool.id, app: typeof tool.app === "string" ? tool.app : "", effect: tool.effect });
-    }
+    const apps = strings(body.apps);
+    const tools = strings(body.tools);
+    if (apps.length === 0 || tools.length === 0)
+        return undefined;
     return { version: CAPABILITIES_VERSION, apps, tools };
 }
 export async function probeCapabilities(config) {
@@ -46,7 +43,8 @@ export async function probeCapabilities(config) {
             method: "GET",
             ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
         });
-        if (response.status >= 500)
+        // A rate limit or an outage is no answer: ask again later, and let the cache stand in.
+        if (response.status === 429 || response.status >= 500)
             return { kind: "unreachable" };
         if (response.status !== 200)
             return { kind: "none" };

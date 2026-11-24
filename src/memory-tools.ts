@@ -71,6 +71,8 @@ export type MemoryToolConfig = {
   gatewayUrl: string;
   token: string;
   fetchImpl?: typeof fetch;
+  /** A save Eragon held for confirmation, by its approval id. */
+  onHeld?: (approvalId: string) => void;
 };
 
 function textResult(value: unknown): CallToolResult {
@@ -103,20 +105,24 @@ function shareResult(body: unknown, gatewayUrl: string): CallToolResult {
  * this key read connector content in the last two hours, so a save that
  * content may have steered is not remembered until the user has seen it.
  */
-function saveAwaitingResult(body: unknown, gatewayUrl: string): CallToolResult {
+function saveAwaitingResult(body: unknown, gatewayUrl: string): { id: string; result: CallToolResult } {
+  // `{ approval: receipt }` (Eragon_s gateway/plugin.ts, the held branch of POST /v1/memory).
   const answer = body !== null && typeof body === "object" ? body : {};
   const approval = "approval" in answer && answer.approval !== null && typeof answer.approval === "object" ? answer.approval : {};
-  const field = (key: string) => (key in approval ? String(Reflect.get(approval, key)) : "");
+  const field = (key: string) => (key in approval && Reflect.get(approval, key) != null ? String(Reflect.get(approval, key)) : "");
   const id = field("id");
   const inbox = new URL(field("reviewPath") || "/inbox", new URL(gatewayUrl).origin).toString();
   const expiresAt = field("expiresAt");
-  return plainResult(
-    "Not saved yet. This session read content from a connected app, so Eragon asks the user to confirm this save first: " +
-      `it is waiting for their confirmation in their Eragon Inbox at ${inbox}` +
-      (expiresAt === "" ? "" : ` before ${expiresAt}`) +
-      ". Until they confirm it, it is not recalled and does not replace any memory. Tell the user; do not save it again." +
-      (id === "" ? "" : ` Approval id: ${id}.`),
-  );
+  return {
+    id,
+    result: plainResult(
+      "Not saved yet. This session read content from a connected app, so Eragon asks the user to confirm this save first: " +
+        `it is waiting for their confirmation in their Eragon Inbox at ${inbox}` +
+        (expiresAt === "" ? "" : ` before ${expiresAt}`) +
+        ". Until they confirm it, it is not recalled and does not replace any memory. Tell the user; do not save it again." +
+        (id === "" ? "" : ` Approval id: ${id}; if connector_call_status is available, it reports whether it was saved.`),
+    ),
+  };
 }
 
 function errorResult(message: string): CallToolResult {
@@ -218,7 +224,11 @@ export async function callMemoryTool(
       return errorResult(gatewayErrorMessage(response.body, response.status));
     }
     if (name === "memory_share") return shareResult(response.body, config.gatewayUrl);
-    if (name === "memory_save" && response.status === 202) return saveAwaitingResult(response.body, config.gatewayUrl);
+    if (name === "memory_save" && response.status === 202) {
+      const held = saveAwaitingResult(response.body, config.gatewayUrl);
+      if (held.id !== "") config.onHeld?.(held.id);
+      return held.result;
+    }
     return textResult(response.body);
   } catch (error) {
     return errorResult(error instanceof Error ? error.message : String(error));

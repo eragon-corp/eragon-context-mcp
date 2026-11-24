@@ -23,15 +23,21 @@ export const CAPABILITIES_VERSION = 1;
 export const CAPABILITIES_PATH = "/v1/connectors/capabilities";
 
 export type ConnectorEffect = "read" | "write";
-export type ConnectorToolSummary = { id: string; app: string; effect: ConnectorEffect };
-export type Capabilities = { version: 1; apps: string[]; tools: ConnectorToolSummary[] };
+/**
+ * What `GET /gw/v1/connectors/capabilities` answers (Eragon_s
+ * `services/gateway-connectors.ts` `capabilities`): the key's granted apps,
+ * whether the workspace has Connections on, and the reviewed tool ids the
+ * key may use. The bridge keeps the apps and tool ids.
+ */
+export type Capabilities = { version: 1; apps: string[]; tools: string[] };
 
 /**
- * - `available`: the Gateway serves Connections to this key.
- * - `none`: it answered that it does not (404 from a server without the
- *   endpoint, a workspace or key without the grant, a refused key, or an
- *   answer this bridge does not understand). Definitive until a restart.
- * - `unreachable`: no answer (network, timeout, 5xx, or no key yet).
+ * - `available`: the Gateway serves Connections to this key: the workspace
+ *   has them on and the key may use at least one reviewed tool.
+ * - `none`: it answered that it does not: 404 from a Gateway without the
+ *   endpoint or with Connections off, a refused key, a workspace that is off
+ *   or a key with no app, or an answer this bridge does not understand.
+ * - `unreachable`: no answer yet (network, timeout, 429, 5xx, or no key yet).
  */
 export type ProbeOutcome =
   | { kind: "available"; capabilities: Capabilities }
@@ -41,17 +47,17 @@ export type ProbeOutcome =
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
-/** The capabilities answer, or undefined when it is not one this bridge understands. */
+const strings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item !== "") : [];
+
+/** The capabilities answer when it offers Connections, or undefined (off, empty, or not understood). */
 export function parseCapabilities(body: unknown): Capabilities | undefined {
   if (!isRecord(body) || body.version !== CAPABILITIES_VERSION) return undefined;
-  const apps = Array.isArray(body.apps) ? body.apps.filter((app): app is string => typeof app === "string" && app !== "") : [];
-  if (apps.length === 0) return undefined;
-  const tools: ConnectorToolSummary[] = [];
-  for (const tool of Array.isArray(body.tools) ? body.tools : []) {
-    if (!isRecord(tool) || typeof tool.id !== "string" || tool.id === "") continue;
-    if (tool.effect !== "read" && tool.effect !== "write") continue;
-    tools.push({ id: tool.id, app: typeof tool.app === "string" ? tool.app : "", effect: tool.effect });
-  }
+  // The server sends `workspace`; a cached entry has already been checked.
+  if ("workspace" in body && body.workspace !== true) return undefined;
+  const apps = strings(body.apps);
+  const tools = strings(body.tools);
+  if (apps.length === 0 || tools.length === 0) return undefined;
   return { version: CAPABILITIES_VERSION, apps, tools };
 }
 
@@ -68,7 +74,8 @@ export async function probeCapabilities(config: {
       method: "GET",
       ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
     });
-    if (response.status >= 500) return { kind: "unreachable" };
+    // A rate limit or an outage is no answer: ask again later, and let the cache stand in.
+    if (response.status === 429 || response.status >= 500) return { kind: "unreachable" };
     if (response.status !== 200) return { kind: "none" };
     const capabilities = parseCapabilities(response.body);
     return capabilities === undefined ? { kind: "none" } : { kind: "available", capabilities };

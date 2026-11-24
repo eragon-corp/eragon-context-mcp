@@ -15,22 +15,24 @@ export declare const CAPABILITY_CACHE_TTL_MS: number;
 export declare const CAPABILITIES_VERSION = 1;
 export declare const CAPABILITIES_PATH = "/v1/connectors/capabilities";
 export type ConnectorEffect = "read" | "write";
-export type ConnectorToolSummary = {
-    id: string;
-    app: string;
-    effect: ConnectorEffect;
-};
+/**
+ * What `GET /gw/v1/connectors/capabilities` answers (Eragon_s
+ * `services/gateway-connectors.ts` `capabilities`): the key's granted apps,
+ * whether the workspace has Connections on, and the reviewed tool ids the
+ * key may use. The bridge keeps the apps and tool ids.
+ */
 export type Capabilities = {
     version: 1;
     apps: string[];
-    tools: ConnectorToolSummary[];
+    tools: string[];
 };
 /**
- * - `available`: the Gateway serves Connections to this key.
- * - `none`: it answered that it does not (404 from a server without the
- *   endpoint, a workspace or key without the grant, a refused key, or an
- *   answer this bridge does not understand). Definitive until a restart.
- * - `unreachable`: no answer (network, timeout, 5xx, or no key yet).
+ * - `available`: the Gateway serves Connections to this key: the workspace
+ *   has them on and the key may use at least one reviewed tool.
+ * - `none`: it answered that it does not: 404 from a Gateway without the
+ *   endpoint or with Connections off, a refused key, a workspace that is off
+ *   or a key with no app, or an answer this bridge does not understand.
+ * - `unreachable`: no answer yet (network, timeout, 429, 5xx, or no key yet).
  */
 export type ProbeOutcome = {
     kind: "available";
@@ -40,7 +42,7 @@ export type ProbeOutcome = {
 } | {
     kind: "unreachable";
 };
-/** The capabilities answer, or undefined when it is not one this bridge understands. */
+/** The capabilities answer when it offers Connections, or undefined (off, empty, or not understood). */
 export declare function parseCapabilities(body: unknown): Capabilities | undefined;
 export declare function probeCapabilities(config: {
     gatewayUrl: string;
