@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { AGENTS, install } from "./install.js";
-import { runMemoryMcp } from "./server.js";
+import { runBridge, staticKey } from "./server.js";
 const USAGE = `eragon-context-mcp — Eragon Memory for coding agents
 
 Usage:
@@ -17,7 +17,9 @@ Environment:
   ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
   ERAGON_API_KEY_COMMAND, used like --key-command only when none of the keys is set
 
-The server exposes exactly three stdio MCP tools: memory_search, memory_save and memory_share.`;
+The server exposes the stdio MCP tools memory_search, memory_save and memory_share,
+and, when Eragon offers this key Connections, connector_tools, connector_call,
+connector_call_status and connector_request_auth.`;
 const NO_KEY = "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN to a personal Gateway key, or pass --key-command.";
 const KEY_VARIABLES = ["ERAGON_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 /** Longer than a keychain read takes, shorter than a client waits for an MCP server to start. */
@@ -98,6 +100,49 @@ export async function loadConfig(argv, environment = process.env, options = {}) 
     if (!read.ok)
         return read;
     return resolveConfig(argv, { ...present, ERAGON_API_KEY: read.key });
+}
+/**
+ * What the bridge starts with, without waiting for a key command (ERA-5056).
+ * A key in the environment is used at once. A key command runs in the
+ * background as the bridge starts: the client's start-up window (10 s in
+ * older Codex) must not be spent on a keychain prompt, and the first
+ * tools/list already waits at most 5 s. A command that fails is run again by
+ * the next tool call, so Memory works once the key can be read (an unlocked
+ * keychain), and its tools are listed all along. A missing URL, or no key and
+ * no command, still stops the bridge at once with the same message as before.
+ */
+export function prepareBridge(argv, environment = process.env, options = {}) {
+    const present = { ...environment };
+    for (const name of KEY_VARIABLES)
+        if (present[name]?.trim() === "")
+            delete present[name];
+    const resolved = resolveConfig(argv, present);
+    if (resolved.ok)
+        return { ok: true, gatewayUrl: resolved.gatewayUrl, key: staticKey(resolved.token) };
+    const command = values(argv, "--key-command").at(-1) ?? present.ERAGON_API_KEY_COMMAND;
+    if (resolved.error !== NO_KEY || command === undefined || command.trim() === "")
+        return resolved;
+    // The URL checks passed (they come before the key), so this is the URL resolveConfig uses.
+    const gatewayUrl = (explicitUrl(argv) ?? present.ERAGON_GATEWAY_URL ?? present.ANTHROPIC_BASE_URL ?? "").replace(/\/+$/, "");
+    const log = options.log ?? ((message) => console.error(message));
+    let read;
+    let running;
+    const key = () => {
+        if (read !== undefined)
+            return Promise.resolve(read);
+        running ??= loadConfig(argv, present, options).then((config) => {
+            running = undefined;
+            if (!config.ok) {
+                log(config.error);
+                return { ok: false, error: `${config.error} The bridge runs it again on the next tool call.` };
+            }
+            read = { ok: true, token: config.token };
+            return read;
+        });
+        return running;
+    };
+    // The bridge's capabilities probe asks for the key as it starts, so the command runs then.
+    return { ok: true, gatewayUrl, key };
 }
 /**
  * Runs a key command through the shell, as Claude Code runs `apiKeyHelper`,
@@ -235,12 +280,12 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (argv[0] === "install")
         return runInstall(argv.slice(1), process.env);
-    const config = await loadConfig(argv);
-    if (!config.ok) {
-        console.error(config.error);
+    const prepared = prepareBridge(argv);
+    if (!prepared.ok) {
+        console.error(prepared.error);
         return 1;
     }
-    await runMemoryMcp(config);
+    await runBridge(prepared);
     return 0;
 }
 //# sourceMappingURL=cli.js.map

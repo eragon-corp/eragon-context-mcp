@@ -8,6 +8,46 @@ export declare function fallbackIdempotencyKey(sessionId: string, requestId: str
  * gateway's system prompt.
  */
 export declare const MEMORY_INSTRUCTIONS: string;
+/** Appended once to a Memory result when Connections arrived after the session listed its tools. */
+export declare const CONNECTIONS_LATE_NOTE = "Eragon Connections were unavailable when this session started. Restart the session to load them.";
+export type KeyResult = {
+    ok: true;
+    token: string;
+} | {
+    ok: false;
+    error: string;
+};
+/** Where the bridge gets its key: at once from the environment, or by running the key command. */
+export type KeySource = () => Promise<KeyResult>;
+export type BridgeOptions = {
+    gatewayUrl: string;
+    key: KeySource;
+    fetchImpl?: typeof fetch;
+    /** Off: exactly the Memory bridge, with no probe. */
+    connectors?: false | {
+        /** null: no cache file. */
+        cacheFile?: string | null;
+        probeWaitMs?: number;
+        retryMs?: number;
+        now?: () => number;
+        /** A late change to the tool list, for a test to observe. */
+        onToolsChanged?: () => void;
+    };
+};
+export declare function staticKey(token: string): KeySource;
+/** How many times a probe that could not reach Eragon is tried again (once a minute). */
+export declare const CAPABILITY_RETRIES = 10;
+/**
+ * The bridge's MCP server. Against a Gateway without Connections (no
+ * capabilities endpoint, the flag or workspace off, a key without the grant)
+ * it lists and answers exactly as the Memory-only bridge did.
+ */
+export declare function createBridgeServer(options: BridgeOptions): Server;
+/** The Memory-only bridge: today's three tools and nothing else. */
 export declare function createMemoryMcpServer(config: MemoryToolConfig): Server;
+export declare function runBridge(options: {
+    gatewayUrl: string;
+    key: KeySource;
+}): Promise<void>;
 export declare function runMemoryMcp(config: MemoryToolConfig): Promise<void>;
 //# sourceMappingURL=server.d.ts.map
