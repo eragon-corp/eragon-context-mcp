@@ -51,7 +51,7 @@ fresh bridge session after adding the write grant.
 | `skill_list` | Check before redoing a known procedure. Optional `query` filters names and descriptions locally. `truncated: true` means the Gateway returned the first 500 skills by name, even if the filter finds none. |
 | `skill_get` | Pass `idOrName` for the published version, `SKILL.md` as `body`, and a list of companion files. Add a bundle-relative `path` to read a text file up to 256 KiB. |
 | `skill_propose` | Propose a reusable procedure with a kebab-case `name`, `description`, `body`, `reason`, and optional `files` with `path` and `content`. |
-| `skill_revise` | Propose a body-only improvement. Pass `skillId` and `baseVersion` from `skill_get`, the new `body`, and a `reason`. The published name and companion files stay as they are. |
+| `skill_revise` | Propose an improvement. Pass `skillId` and `baseVersion` from `skill_get`, the new `body`, and a `reason`. Optionally supply a new `name` and, with it, a `description` for an explicit rename request. Companion files carry over. |
 
 Proposals wait on **Skills → Installed**. The key owner can **Publish** a new
 skill or review the diff and **Accept revision** to apply a draft. The receipt
@@ -68,10 +68,19 @@ companion file a unique path of at most 500 characters. The whole JSON
 request is limited to 2 MiB. Eragon adds name and description frontmatter when
 the body arrives without it, and the resulting body must still fit 64 KiB.
 
+The bridge submits a revision directly. Eragon supplies the existing name and
+description when omitted, including existing names that predate the
+kebab-case requirement for new skills.
+
 The bridge retries a new skill proposal once if the connection fails before
-any response, using the identical request. If the published version changes
-during a revision, call `skill_get` again, reconcile the changes, and retry
-`skill_revise` once.
+any response, using the identical request. Eragon returns the earlier
+proposal only when the name, SKILL.md, and companion file paths and contents
+match. If the name is taken, check **Skills → Installed** for an earlier
+proposal before submitting under another name.
+
+If the published version changes, call `skill_get` again, reconcile the
+changes, and retry `skill_revise` once. If another change is being applied,
+wait for it to land before re-reading the skill.
 
 ## Install from GitHub
 

@@ -48,15 +48,16 @@ async function gateway(state: {
   empty?: boolean;
   truncated?: boolean;
   relativeReview?: boolean;
-  afterRead?: "publish" | "disable";
+  version?: number;
+  skillName?: string;
   dropProposal?: "once" | "always";
   pendingRevision?: boolean;
   refuseProposal?: { status: number; body: { error: string; message?: string } };
 } = {}) {
   const requests: { method: string | undefined; url: string | undefined; body: unknown }[] = [];
   const proposals: unknown[] = [];
-  const drafts = new Map<string, { id: string; skillBody: string; status: "proposed" | "review" }>();
-  let version = skill.version;
+  const drafts = new Map<string, { id: string; skillBody: string; files: Map<string, Buffer>; status: "proposed" | "review" }>();
+  const currentSkill = { ...skill, name: state.skillName ?? skill.name };
   const server = createServer(async (request, response) => {
     const send = (status: number, body: unknown) => {
       response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
@@ -68,6 +69,7 @@ async function gateway(state: {
     for await (const chunk of request) data.push(chunk);
     const payload = Buffer.concat(data);
     const body = payload.length ? JSON.parse(payload.toString()) : undefined;
+    const version = state.version ?? skill.version;
     requests.push({ method, url, body });
     if (request.headers.authorization !== `Bearer ${token}`) return send(401, {
       type: "error", error: { type: "authentication_error", message: "invalid API key" }, request_id: unknownRoute.request_id,
@@ -110,16 +112,18 @@ async function gateway(state: {
         }));
         return send(200, { skills: capped, truncated: true });
       }
-      return send(200, { skills: state.empty ? [] : [{ ...skill, version }] });
+      return send(200, { skills: state.empty ? [] : [{ ...currentSkill, version }] });
     }
     if (isProposal) {
       if (state.refuseProposal) return send(state.refuseProposal.status, state.refuseProposal.body);
-      const name = body.name.trim();
-      const description = body.description.trim();
+      const revising = body.baseSkillId !== undefined;
+      const name = body.name?.trim() ?? (revising ? currentSkill.name : "");
+      const description = body.description?.trim() ?? (revising ? currentSkill.description : "");
       const submitted = body.body.trim();
       if (
-        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 100 ||
-        description.length < 1 || description.length > 500 || !submitted || Buffer.byteLength(body.body) > 64 * 1024 ||
+        ((!revising || body.name !== undefined) && (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 100)) ||
+        ((!revising || body.description !== undefined) && (description.length < 1 || description.length > 500)) ||
+        !submitted || Buffer.byteLength(body.body) > 64 * 1024 ||
         body.reason.trim().length < 1 || body.reason.trim().length > 2000 ||
         (body.baseVersion !== undefined && (!body.baseSkillId || !Number.isInteger(body.baseVersion) || body.baseVersion < 1)) ||
         (body.files !== undefined && (body.files.length > 50 ||
@@ -134,20 +138,21 @@ async function gateway(state: {
         }
         const result = {
           proposalId: id, status: "proposed", reviewUrl: state.relativeReview ? "/skills/installed" : installed,
-          kind: body.baseSkillId ? "revision" : "skill", skillId: id,
-          ...(body.baseSkillId ? { baseVersion: version } : {}),
+          kind: revising ? "revision" : "skill", skillId: id,
+          ...(revising ? { baseVersion: version } : {}),
         };
         send(201, result);
       };
       const files: { path: string; content: string }[] = body.files ?? [];
-      const draftName = body.baseSkillId ? skill.name : name;
+      const fileContents = new Map(files.map(({ path, content }) => [path, Buffer.from(content, "utf8")]));
+      const draftName = revising ? currentSkill.name : name;
       const withFrontmatter = submitted.startsWith("---")
         ? submitted.replace(/^(---\n)name: [^\n]+/, `$1name: ${draftName}`)
         : `---\nname: ${draftName}\ndescription: ${description}\n---\n\n${submitted}`;
       if (Buffer.byteLength(withFrontmatter) > 64 * 1024) {
         return send(400, { error: "invalid_proposal", message: "SKILL.md with its frontmatter is over the size limit" });
       }
-      if (body.baseSkillId) {
+      if (revising) {
         if (files.length > 0) return send(400, {
           error: "revision_files_unsupported", message: "a revision proposes SKILL.md only; its other files stay as they are",
         });
@@ -174,29 +179,30 @@ async function gateway(state: {
           paths.add(path);
         }
         const existing = drafts.get(name);
-        if (existing?.status === "proposed" && existing.skillBody === withFrontmatter) return reply(existing.id);
-        if (name === skill.name || existing !== undefined) return send(409, {
+        if (
+          existing?.status === "proposed" && existing.skillBody === withFrontmatter &&
+          existing.files.size === fileContents.size &&
+          [...fileContents].every(([path, content]) => existing.files.get(path)?.equals(content) === true)
+        ) return reply(existing.id);
+        if (name === currentSkill.name || existing !== undefined) return send(409, {
           error: "skill_name_taken", message: "skill name already exists in this visibility scope",
         });
       }
       const id = body.baseSkillId ?? `skl_${drafts.size + 2}`;
-      drafts.set(draftName, { id, skillBody: withFrontmatter, status: body.baseSkillId ? "review" : "proposed" });
+      drafts.set(draftName, { id, skillBody: withFrontmatter, files: fileContents, status: revising ? "review" : "proposed" });
       proposals.push(body);
       return reply(id);
     }
     const ref = target?.[1] === undefined ? undefined : decodeURIComponent(target[1]);
     const path = target?.[2] === undefined ? undefined : decodeURIComponent(target[2]);
-    if (method === "GET" && (ref === skill.id || ref?.toLowerCase() === skill.name) && path === undefined) {
+    if (method === "GET" && (ref === skill.id || ref?.toLowerCase() === currentSkill.name.toLowerCase()) && path === undefined) {
       const detail = {
-        id: skill.id, name: skill.name, description: skill.description, version,
+        id: skill.id, name: currentSkill.name, description: skill.description, version,
         body: skillBody, files: companionFiles,
       };
-      if (state.afterRead === "publish") version += 1;
-      if (state.afterRead === "disable") state.skills = "flag off";
-      delete state.afterRead;
       return send(200, detail);
     }
-    if (method === "GET" && (ref === skill.id || ref?.toLowerCase() === skill.name)) {
+    if (method === "GET" && (ref === skill.id || ref?.toLowerCase() === currentSkill.name.toLowerCase())) {
       if (path === filePath || path === "empty.txt") {
         response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(path === filePath ? fileContent : "");
         return;
@@ -242,6 +248,7 @@ const proposal = { name: "triage-builds", description: "Find failed builds", ...
 const save = { kind: "fact", title: "Release day", content: "Friday" };
 const jsonResult = (body: unknown) => ({ content: [{ type: "text", text: JSON.stringify(body, null, 2) }] });
 const toolError = (text: string) => ({ isError: true, content: [{ type: "text", text }] });
+const nameTaken = toolError("A skill already uses that name. Your earlier proposal may still be waiting for review on Skills → Installed. Check there before proposing under another name. skill name already exists in this visibility scope");
 
 describe("Flux Skills MCP contract", () => {
   it("hides Skills on both an old Gateway and a flag-off Gateway while all Memory tools still work", async () => {
@@ -536,10 +543,10 @@ describe("Flux Skills MCP contract", () => {
       jsonResult({ ...receipt, proposalId: "skl_3", skillId: "skl_3" }),
     );
     expect(await client.callTool({ name: "skill_propose", arguments: { ...proposal, name: skill.name } })).toEqual(
-      toolError("A skill already uses that name. Use skill_get for a published skill or choose another name. skill name already exists in this visibility scope"),
+      nameTaken,
     );
     expect(await client.callTool({ name: "skill_propose", arguments: { ...proposal, body: "Different instructions" } })).toEqual(
-      toolError("A skill already uses that name. Use skill_get for a published skill or choose another name. skill name already exists in this visibility scope"),
+      nameTaken,
     );
     state.refuseProposal = {
       status: 409, body: { error: "skill_name_proposed", message: "A skill with this name is waiting for a team lead to publish." },
@@ -560,6 +567,33 @@ describe("Flux Skills MCP contract", () => {
     expect(gw.requests).toEqual([post, post]);
     expect(gw.proposals).toEqual([proposal]);
     expect(gw.drafts.get(proposal.name)?.id).toBe(receipt.proposalId);
+  });
+
+  it("returns 409 when the name and body match a pending proposal but its companion files differ", async () => {
+    const gw = await gateway();
+    const statuses: number[] = [];
+    const client = await connect({
+      ...gw,
+      fetchImpl: async (url, init) => {
+        const response = await fetch(url, init);
+        statuses.push(response.status);
+        return response;
+      },
+    });
+    expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(jsonResult(receipt));
+    const conflict = await client.callTool({
+      name: "skill_propose", arguments: { ...proposal, files: [{ path: filePath, content: "Updated companion text" }] },
+    });
+    expect(statuses).toEqual([201, 409]);
+    expect(conflict).toEqual(nameTaken);
+    expect(gw.proposals).toEqual([proposal]);
+  });
+
+  it("points the agent to Skills Installed when its own waiting proposal already uses the name", async () => {
+    const gw = await gateway();
+    const client = await connect(gw);
+    expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(jsonResult(receipt));
+    expect(await client.callTool({ name: "skill_propose", arguments: { ...proposal, body: "A different body" } })).toEqual(nameTaken);
   });
 
   it("stops replaying a new proposal after one retry and never replays a revision", async () => {
@@ -726,6 +760,58 @@ describe("Flux Skills MCP contract", () => {
     expect(gw.requests).toEqual([{ method: "GET", url: "/gw/v1/skills", body: undefined }]);
   });
 
+  it("tells the agent to re-read after an in-progress change lands before retrying the revision", async () => {
+    const client = await connect(await gateway({ pendingRevision: true }));
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(
+      toolError("Another change to this skill is being applied. Call skill_get after it lands, then retry skill_revise. another change to this skill is being applied; propose again after it lands"),
+    );
+  });
+
+  it("sends a body-only revision as a single POST with no metadata read", async () => {
+    const gw = await gateway();
+    const client = await connect(gw);
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(
+      jsonResult({ ...receipt, proposalId: skill.id, skillId: skill.id, kind: "revision", baseVersion: skill.version }),
+    );
+    expect(gw.requests).toEqual([{
+      method: "POST", url: "/gw/v1/skills/proposals",
+      body: { ...draft, baseSkillId: skill.id, baseVersion: skill.version },
+    }]);
+  });
+
+  it("revises a legacy non-kebab skill while the create route still refuses a non-kebab name", async () => {
+    const skillName = "Release Notes Legacy";
+    const gw = await gateway({ skillName });
+    const client = await connect(gw);
+    const refused = await fetch(`${gw.gatewayUrl}/v1/skills/proposals`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ ...proposal, name: skillName }),
+    });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: "invalid_proposal" });
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(
+      jsonResult({ ...receipt, proposalId: skill.id, skillId: skill.id, kind: "revision", baseVersion: skill.version }),
+    );
+    expect(gw.drafts.get(skillName)?.skillBody).toContain(`name: ${skillName}`);
+  });
+
+  it("forwards name and description only for an explicit rename request", async () => {
+    const gw = await gateway();
+    const client = await connect(gw);
+    const name = "renamed-skill";
+    const description = "Changed description";
+    expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, description } })).toEqual(
+      toolError("Supply a description in skill_revise only with an explicit rename request."),
+    );
+    expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, name, description } })).toEqual(
+      jsonResult({ ...receipt, proposalId: skill.id, skillId: skill.id, kind: "revision", baseVersion: skill.version }),
+    );
+    expect(gw.requests).toEqual([{
+      method: "POST", url: "/gw/v1/skills/proposals",
+      body: { ...draft, baseSkillId: skill.id, baseVersion: skill.version, name, description },
+    }]);
+  });
+
   it("handles unchanged and pending revisions and allows another review draft to replace the first", async () => {
     const state: Parameters<typeof gateway>[0] = { relativeReview: true };
     const gw = await gateway(state);
@@ -737,15 +823,13 @@ describe("Flux Skills MCP contract", () => {
       proposalId: skill.id, status: "proposed", reviewUrl: new URL("/skills/installed", gw.gatewayUrl).href,
       kind: "revision", skillId: skill.id, baseVersion: 3,
     });
-    expect(await client.callTool({
-      name: "skill_revise", arguments: { ...revision, name: "renamed-skill", description: "Changed description" },
-    })).toEqual(revisionReceipt);
-    expect(gw.proposals).toEqual([{ ...draft, name: skill.name, description: skill.description, baseSkillId: skill.id, baseVersion: 3 }]);
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(revisionReceipt);
+    expect(gw.proposals).toEqual([{ ...draft, baseSkillId: skill.id, baseVersion: 3 }]);
     expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, body: "Replaced draft" } })).toEqual(revisionReceipt);
     expect(gw.drafts.get(skill.name)).toMatchObject({ status: "review", skillBody: expect.stringContaining("Replaced draft") });
     state.pendingRevision = true;
     expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(
-      toolError("A change to this skill is already waiting for review on Skills → Installed. another change to this skill is being applied; propose again after it lands"),
+      toolError("Another change to this skill is being applied. Call skill_get after it lands, then retry skill_revise. another change to this skill is being applied; propose again after it lands"),
     );
   });
 
@@ -755,14 +839,14 @@ describe("Flux Skills MCP contract", () => {
     const client = await connect(gw);
     const prior = await client.callTool({ name: "skill_get", arguments: { idOrName: skill.id } });
     expect(prior).toMatchObject({ content: [{ type: "text", text: expect.stringContaining('"version": 3') }] });
-    state.afterRead = "publish";
+    state.version = 4;
     expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual({
       isError: true,
       content: [{ type: "text", text: "The skill version changed. Current version is 4. Call skill_get again, reconcile your changes, and retry skill_revise once. the skill changed to v4 after this was written for v3" }],
     });
     const postRequests = () => gw.requests.filter(({ method }) => method === "POST");
     expect(gw.proposals).toEqual([]);
-    const revisionPost = { ...draft, name: skill.name, description: skill.description, baseSkillId: skill.id, baseVersion: 3 };
+    const revisionPost = { ...draft, baseSkillId: skill.id, baseVersion: 3 };
     expect(postRequests()).toEqual([{ method: "POST", url: "/gw/v1/skills/proposals", body: revisionPost }]);
 
     const latest = await client.callTool({ name: "skill_get", arguments: { idOrName: skill.id } });
@@ -793,10 +877,12 @@ describe("Flux Skills MCP contract", () => {
     expect(await toolNames(client)).toEqual(allTools);
   });
 
-  it("handles a flag flip between a revision's metadata read and proposal POST", async () => {
-    const gw = await gateway({ afterRead: "disable" });
+  it("handles a flag flip between listing Skills and posting a revision", async () => {
+    const state: Parameters<typeof gateway>[0] = {};
+    const gw = await gateway(state);
     const client = await connect(gw);
     expect(await toolNames(client)).toEqual(allTools);
+    state.skills = "flag off";
     expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(proposalsUnavailable);
     expect(gw.proposals).toEqual([]);
     expect(await toolNames(client)).toEqual(memoryTools);

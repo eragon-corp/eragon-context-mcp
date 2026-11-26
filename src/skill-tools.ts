@@ -37,6 +37,9 @@ const draftFields = {
   reason: { type: "string", minLength: 1, maxLength: REASON_MAX, description: "Why the proposed change should be reviewed." },
 };
 
+const skillNameField = { type: "string", pattern: NAME_PATTERN, maxLength: NAME_MAX };
+const skillDescriptionField = { type: "string", minLength: 1, maxLength: DESCRIPTION_MAX };
+
 export const SKILL_TOOLS: Tool[] = [
   {
     name: "skill_list",
@@ -66,8 +69,8 @@ export const SKILL_TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", pattern: NAME_PATTERN, maxLength: NAME_MAX, description: "Kebab-case, such as release-notes." },
-        description: { type: "string", minLength: 1, maxLength: DESCRIPTION_MAX },
+        name: { ...skillNameField, description: "Kebab-case, such as release-notes." },
+        description: skillDescriptionField,
         ...draftFields,
         files: fileSchema,
       },
@@ -77,10 +80,16 @@ export const SKILL_TOOLS: Tool[] = [
   },
   {
     name: "skill_revise",
-    description: "Propose a body revision to a skill you improved, using its ID and version from skill_get. Tell the user to review the diff and accept it on Skills → Installed at the returned reviewUrl.",
+    description: "Propose a revision to a skill you improved, using its ID and version from skill_get. Tell the user to review the diff and accept it on Skills → Installed at the returned reviewUrl.",
     inputSchema: {
       type: "object",
-      properties: { skillId: { type: "string" }, baseVersion: { type: "integer", minimum: 1 }, ...draftFields },
+      properties: {
+        skillId: { type: "string" },
+        baseVersion: { type: "integer", minimum: 1 },
+        ...draftFields,
+        name: { ...skillNameField, description: "Only supply for an explicit rename request." },
+        description: { ...skillDescriptionField, description: "Optional description for an explicit rename request." },
+      },
       required: ["skillId", "baseVersion", "body", "reason"],
       additionalProperties: false,
     },
@@ -292,7 +301,7 @@ function gatewayError(
       message = `The skill version changed.${version} Call skill_get again, reconcile your changes, and retry skill_revise once.`;
       break;
     case "skill_name_taken":
-      message = "A skill already uses that name. Use skill_get for a published skill or choose another name.";
+      message = "A skill already uses that name. Your earlier proposal may still be waiting for review on Skills → Installed. Check there before proposing under another name.";
       break;
     case "skill_name_proposed":
       message = "A proposal for that skill name is already waiting for review on Skills → Installed.";
@@ -318,7 +327,7 @@ function gatewayError(
       message = `The revision matches the published skill.${version} Submit a revision only when the body changes.`;
       break;
     case "skill_revision_waiting":
-      message = "A change to this skill is already waiting for review on Skills → Installed.";
+      message = "Another change to this skill is being applied. Call skill_get after it lands, then retry skill_revise.";
       break;
     case "skill_cannot_be_revised":
       message = "This skill cannot be revised with the current Eragon key.";
@@ -388,19 +397,20 @@ async function callSkillTool(
     }
     if (name !== "skill_propose" && name !== "skill_revise") return errorResult(`Unknown Eragon Skills tool: ${name}`);
 
-    const { body, files, reason } = args;
+    const { body, files, reason, name: skillName, description } = args;
     if (!nonEmpty(body) || !nonEmpty(reason)) return errorResult(`${name} requires a body and reason.`);
     if (Buffer.byteLength(body) > BODY_MAX_BYTES) return errorResult("The skill body must be at most 64 KiB of UTF-8 text.");
     if (reason.length > REASON_MAX) return errorResult(`The proposal reason must be at most ${REASON_MAX} characters.`);
+    const isNew = name === "skill_propose";
+    if ((isNew || skillName !== undefined) &&
+        (typeof skillName !== "string" || skillName.length > NAME_MAX || !NAME_REGEX.test(skillName))) {
+      return errorResult(`The skill name must be kebab-case with at most ${NAME_MAX} characters, such as release-notes.`);
+    }
+    if ((isNew || description !== undefined) && (!nonEmpty(description) || description.trim().length > DESCRIPTION_MAX)) {
+      return errorResult(`The skill description must contain 1 to ${DESCRIPTION_MAX} characters.`);
+    }
     let proposal: Record<string, unknown>;
-    if (name === "skill_propose") {
-      const { name: skillName, description } = args;
-      if (typeof skillName !== "string" || skillName.length > NAME_MAX || !NAME_REGEX.test(skillName)) {
-        return errorResult(`The skill name must be kebab-case with at most ${NAME_MAX} characters, such as release-notes.`);
-      }
-      if (!nonEmpty(description) || description.trim().length > DESCRIPTION_MAX) {
-        return errorResult(`The skill description must contain 1 to ${DESCRIPTION_MAX} characters.`);
-      }
+    if (isNew) {
       proposal = { name: skillName, description, body, reason };
       if (files !== undefined) {
         if (!Array.isArray(files) || files.length > FILES_MAX || !files.every(isProposalFile)) {
@@ -421,15 +431,13 @@ async function callSkillTool(
       if (!validSkillId(skillId) || typeof baseVersion !== "number" || !Number.isSafeInteger(baseVersion) || baseVersion < 1) {
         return errorResult("skill_revise requires a skillId and an integer baseVersion from skill_get.");
       }
-      const id = skillId.trim();
-      // The proposal endpoint needs the published name and description even for a revision.
-      const response = await get(`${SKILLS_PATH}/${encodeURIComponent(id)}`);
-      if (response.status !== 200) return gatewayError(response, "read", onUnavailable);
-      const skill = response.body;
-      if (!isSkillDetail(skill) || skill.id !== id) {
-        return errorResult("Eragon returned invalid skill metadata. Use the skill ID from skill_get.");
+      if (skillName === undefined && description !== undefined) {
+        return errorResult("Supply a description in skill_revise only with an explicit rename request.");
       }
-      proposal = { name: skill.name, description: skill.description, body, reason, baseSkillId: id, baseVersion };
+      // Eragon fills in the published metadata. A separate detail GET records a skill use.
+      proposal = { body, reason, baseSkillId: skillId.trim(), baseVersion };
+      if (skillName !== undefined) proposal.name = skillName;
+      if (description !== undefined) proposal.description = description;
     }
     if (Buffer.byteLength(JSON.stringify(proposal)) > PROPOSAL_MAX_BYTES) {
       return errorResult("The JSON skill proposal must be at most 2 MiB.");
@@ -440,11 +448,11 @@ async function callSkillTool(
       path: `${SKILLS_PATH}/proposals`,
       body: proposal,
       timeoutMs: Math.max(0, deadline - Date.now()),
-      retryOnNetworkError: name === "skill_propose",
+      retryOnNetworkError: isNew,
     });
     if (response.status !== 201) return gatewayError(response, "write", onUnavailable);
     const receipt = response.body;
-    const kind = name === "skill_propose" ? "skill" : "revision";
+    const kind = isNew ? "skill" : "revision";
     if (
       !isRecord(receipt) || receipt.status !== "proposed" || receipt.kind !== kind ||
       !nonEmpty(receipt.skillId) || receipt.proposalId !== receipt.skillId || !nonEmpty(receipt.reviewUrl) ||
