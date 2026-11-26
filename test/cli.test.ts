@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -228,13 +229,17 @@ describe("loadConfig: the key from a command when the environment has none", () 
   });
 });
 
-describe("the bridge as an MCP client starts it, with no key in its environment", () => {
-  /** Starts the real command, says hello over stdio, and returns its first answer or its exit and stderr. */
-  function start(args: string[]): Promise<{ answer?: unknown; code?: number | null; stderr: string }> {
-    const child = spawn(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), ...args], {
-      env: PATH_ONLY,
+describe("the bridge as an MCP client starts it", () => {
+  function launch(args: string[], env = PATH_ONLY) {
+    return spawn(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), ...args], {
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+  }
+
+  /** Starts the real command, says hello over stdio, and returns its first answer or its exit and stderr. */
+  function start(args: string[], env?: NodeJS.ProcessEnv): Promise<{ answer?: unknown; code?: number | null; stderr: string }> {
+    const child = launch(args, env);
     let stderr = "";
     let stdout = "";
     child.stderr.on("data", (chunk) => (stderr += String(chunk)));
@@ -269,7 +274,8 @@ describe("the bridge as an MCP client starts it, with no key in its environment"
   }
 
   it("answers initialize when a key command supplies the key", async () => {
-    const started = await start(["--url", GW, "--key-command", node("process.stdout.write('esk_from_keychain')")]);
+    const command = node("setTimeout(() => process.stdout.write('esk_from_keychain'), 100)");
+    const started = await start(["--url", GW, "--key-command", command]);
     expect(started.stderr).not.toContain("Set ERAGON_API_KEY");
     expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: expect.any(String) } } });
     expect(JSON.stringify(started.answer)).not.toContain("esk_from_keychain");
@@ -280,4 +286,51 @@ describe("the bridge as an MCP client starts it, with no key in its environment"
     expect(started.code).toBe(1);
     expect(started.stderr).toContain("Set ERAGON_API_KEY");
   });
+
+  it("answers initialize with ERAGON_API_KEY and no helper", async () => {
+    const started = await start(["--url", GW], { ...PATH_ONLY, ERAGON_API_KEY: "esk_from_environment" });
+    expect(started.stderr).toBe("");
+    expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "eragon-context" } } });
+  });
+
+  it.skipIf(process.platform === "win32").each(["stdin EOF", "SIGTERM"])(
+    "stops the helper tree promptly on %s during startup",
+    async (shutdown) => {
+      const dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+      const pidFile = join(dir, "pids");
+      // The shell stays alive as a parent because it has another command to run.
+      const command = `${node(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify([process.ppid, process.pid])); setTimeout(() => {}, 20000)`)}; echo esk_late`;
+      const bridge = launch(["--url", GW, "--key-command", command]);
+      const closed = once(bridge, "close");
+      let bridgeExited = false;
+      bridge.once("exit", () => { bridgeExited = true; });
+      let pids: [number, number] | undefined;
+      const running = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+          throw error;
+        }
+      };
+      try {
+        await expect.poll(() => existsSync(pidFile), { timeout: 1500 }).toBe(true);
+        pids = JSON.parse(readFileSync(pidFile, "utf8")) as [number, number];
+        const [helperPid, childPid] = pids;
+        // The client may have sent initialize already when it closes its pipe.
+        bridge.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
+        if (shutdown === "stdin EOF") bridge.stdin.end();
+        else bridge.kill("SIGTERM");
+        await expect.poll(() => ({ bridgeExited, helperRunning: running(helperPid), childRunning: running(childPid) }), {
+          timeout: 1500,
+        }).toEqual({ bridgeExited: true, helperRunning: false, childRunning: false });
+      } finally {
+        if (pids !== undefined && pids.some(running)) process.kill(-pids[0], "SIGKILL");
+        if (!bridgeExited) bridge.kill("SIGKILL");
+        await closed;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

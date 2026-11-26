@@ -20,8 +20,8 @@ guidance to every model call.
 
 It cannot write Team, Organization, Knowledge, or Project data. A memory reaches
 a team or the workspace only when the key owner approves a share in Eragon. It never stores
-the Gateway key in MCP configuration; the child process reads the key already
-present in the coding agent's environment.
+the Gateway key in MCP configuration. The bridge reads the key from the coding
+agent's environment or from a configured key command.
 
 ## Requirements
 
@@ -152,22 +152,25 @@ Claude Code inside Claude Desktop gets its Gateway key from Desktop's
 third-party inference configuration, not from an environment variable, so the
 bridge it starts finds none and exits with `Set ERAGON_API_KEY, …`. Give the
 bridge a command that reads the key where Eragon Flux keeps it instead. On
-macOS, `eragon-flux setup --desktop` stores the Desktop key in the login
-keychain under the service `eragon-flux`:
+macOS, `eragon-flux setup --desktop` in key mode uses the login keychain when
+available. The service is `eragon-flux` and the Desktop account is
+`eragon-flux:<digest>-desktop`. The digest is the first 32 lowercase hex
+characters of the SHA-256 of the Gateway URL. Use the Desktop setup's URL
+ending in `/gw`, with a lowercase scheme and host, no default port (443 for
+HTTPS), and no trailing slash. Keep the path's original case.
 
 ```sh
-account="$(/usr/bin/security dump-keychain | grep -o 'eragon-flux:[0-9a-f]\{32\}-desktop' | head -n 1)"
-if [ -n "$account" ]; then
-  eragon-context-mcp install --agent claude-code --url https://<your-eragon>/gw \
-    --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
-else
-  echo "No Eragon Flux Desktop key in the login keychain. Run eragon-flux setup --desktop first."
-fi
+gateway_url="https://<your-eragon>/gw"
+digest="$(printf '%s' "$gateway_url" | /usr/bin/shasum -a 256 | cut -c1-32)"
+account="eragon-flux:${digest}-desktop"
+eragon-context-mcp install --agent claude-code --url "$gateway_url" \
+  --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
 ```
 
-The entry holds the command, never the key. Quit Claude Desktop, open it again,
-and start a new Code session. The key needs **Use my Eragon context**, or
-`memory_search` answers 403.
+The entry holds the command, never the key. If the account is missing, unlock
+the login keychain and rerun `eragon-flux setup --desktop --url "$gateway_url"`.
+Quit Claude Desktop, open it again, and start a new Code session. The key needs
+**Use my Eragon context**, or `memory_search` answers 403.
 
 ## Configuration
 
@@ -186,8 +189,9 @@ The key is resolved in this order:
 
 The key command runs only when none of the three variables is set, so an
 exported key always wins. It runs through the shell, as Claude Code runs
-`apiKeyHelper`, and must print one key within 15 seconds; at the deadline the
-bridge stops it and everything it started. The bridge never logs what it
+`apiKeyHelper`, and must print one key within 15 seconds. The bridge stops the
+command and its children at the deadline or if, while waiting for the key,
+the MCP client closes stdin or sends `SIGTERM`. The bridge never logs what it
 printed. On Windows, `install` refuses a key command with `%`, double quotes
 or line breaks, because cmd.exe would change it: put it in a script instead. `install --key-command` writes the command, and the URL
 it belongs to, into each agent's entry.

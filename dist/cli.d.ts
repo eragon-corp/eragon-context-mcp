@@ -1,12 +1,15 @@
+import type { Readable } from "node:stream";
 type ConfigEnvironment = Partial<Record<"ERAGON_GATEWAY_URL" | "ANTHROPIC_BASE_URL" | "ERAGON_API_KEY" | "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN", string>>;
+type ConfigError = {
+    ok: false;
+    error: string;
+    exitCode?: 0 | 143;
+};
 export type ResolvedConfig = {
     ok: true;
     gatewayUrl: string;
     token: string;
-} | {
-    ok: false;
-    error: string;
-};
+} | ConfigError;
 /** Longer than a keychain read takes, shorter than a client waits for an MCP server to start. */
 export declare const KEY_COMMAND_TIMEOUT_MS = 15000;
 export declare function resolveConfig(argv: string[], environment?: ConfigEnvironment): ResolvedConfig;
@@ -22,6 +25,7 @@ export declare function resolveConfig(argv: string[], environment?: ConfigEnviro
  */
 export declare function loadConfig(argv: string[], environment?: NodeJS.ProcessEnv, options?: {
     keyCommandTimeoutMs?: number;
+    keyCommandStdin?: Readable;
 }): Promise<ResolvedConfig>;
 export declare function main(argv?: string[]): Promise<number>;
 export {};

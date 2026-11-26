@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
+
+import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/sdk/shared/stdio.js";
 
 import { AGENTS, install, type Agent } from "./install.js";
 import { runMemoryMcp } from "./server.js";
@@ -32,9 +35,8 @@ type ConfigEnvironment = Partial<
   >
 >;
 
-export type ResolvedConfig =
-  | { ok: true; gatewayUrl: string; token: string }
-  | { ok: false; error: string };
+type ConfigError = { ok: false; error: string; exitCode?: 0 | 143 };
+export type ResolvedConfig = { ok: true; gatewayUrl: string; token: string } | ConfigError;
 
 const NO_KEY =
   "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN to a personal Gateway key, or pass --key-command.";
@@ -124,7 +126,7 @@ export function resolveConfig(
 export async function loadConfig(
   argv: string[],
   environment: NodeJS.ProcessEnv = process.env,
-  options: { keyCommandTimeoutMs?: number } = {},
+  options: { keyCommandTimeoutMs?: number; keyCommandStdin?: Readable } = {},
 ): Promise<ResolvedConfig> {
   // An empty variable is no key; left in, it would trip the different-key check.
   const present: NodeJS.ProcessEnv = { ...environment };
@@ -133,7 +135,7 @@ export async function loadConfig(
   const command = values(argv, "--key-command").at(-1) ?? present.ERAGON_API_KEY_COMMAND;
   // Only a missing key reaches the command: a URL problem is reported without running anything.
   if (resolved.ok || resolved.error !== NO_KEY || command === undefined || command.trim() === "") return resolved;
-  const read = await keyFromCommand(command, present, options.keyCommandTimeoutMs ?? KEY_COMMAND_TIMEOUT_MS);
+  const read = await keyFromCommand(command, present, options.keyCommandTimeoutMs ?? KEY_COMMAND_TIMEOUT_MS, options.keyCommandStdin);
   if (!read.ok) return read;
   return resolveConfig(argv, { ...present, ERAGON_API_KEY: read.key });
 }
@@ -143,22 +145,36 @@ export async function loadConfig(
  * and takes the one word it prints. What it printed never reaches an error:
  * a failing command may still have printed a key. Its stdout is piped, never
  * inherited, because the bridge's own stdout is the MCP channel. On POSIX it
- * leads its own process group, so a deadline stops everything it started: a
+ * leads its own process group, so shutdown stops everything it started: a
  * shell's child that outlived it would hold the pipe and keep the bridge alive.
  */
 function keyFromCommand(
   command: string,
   environment: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<{ ok: true; key: string } | { ok: false; error: string }> {
+  stdin?: Readable,
+): Promise<{ ok: true; key: string } | ConfigError> {
   return new Promise((resolve) => {
+    if (stdin?.readableEnded || stdin?.destroyed) {
+      resolve({ ok: false, error: "MCP stdin closed during startup.", exitCode: 0 });
+      return;
+    }
     let printed = "";
     let overflow = false;
     let settled = false;
-    const finish = (result: { ok: true; key: string } | { ok: false; error: string }) => {
+    const queuedInput: Buffer[] = [];
+    let queuedBytes = 0;
+    const finish = (result: { ok: true; key: string } | ConfigError) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (stdin !== undefined) {
+        process.off("SIGTERM", terminate);
+        stdin.off("end", disconnect).off("close", disconnect).off("error", disconnect).off("data", queueInput);
+        stdin.pause();
+        // Put early JSON-RPC messages back in front of anything still unread by the transport.
+        if (result.ok) for (const chunk of queuedInput.reverse()) stdin.unshift(chunk);
+      }
       resolve(result);
     };
     const windows = process.platform === "win32";
@@ -169,12 +185,30 @@ function keyFromCommand(
       windowsHide: true,
       detached: !windows,
     });
-    const timer = setTimeout(() => {
+    const stop = (result: ConfigError) => {
       stopTree(child.pid, windows, () => child.kill("SIGKILL"));
       child.stdout.destroy();
+      finish(result);
+    };
+    const timer = setTimeout(() => {
       child.unref();
-      finish({ ok: false, error: `The key command did not finish within ${timeoutMs / 1000} s.` });
+      stop({ ok: false, error: `The key command did not finish within ${timeoutMs / 1000} s.` });
     }, timeoutMs);
+    const disconnect = () => stop({ ok: false, error: "MCP stdin closed during startup.", exitCode: 0 });
+    const terminate = () => stop({ ok: false, error: "The bridge was terminated during startup.", exitCode: 143 });
+    const queueInput = (chunk: Buffer) => {
+      queuedBytes += chunk.length;
+      if (queuedBytes > STDIO_DEFAULT_MAX_BUFFER_SIZE) {
+        stop({ ok: false, error: "Too much MCP input arrived before the key command finished." });
+      } else {
+        queuedInput.push(chunk);
+      }
+    };
+    if (stdin !== undefined) {
+      process.once("SIGTERM", terminate);
+      // Drain stdin so EOF is detectable even if the client already sent initialize.
+      stdin.once("end", disconnect).once("close", disconnect).once("error", disconnect).on("data", queueInput);
+    }
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (overflow || printed.length + chunk.length > KEY_COMMAND_OUTPUT_LIMIT) overflow = true;
@@ -270,11 +304,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (argv[0] === "install") return runInstall(argv.slice(1), process.env);
-  const config = await loadConfig(argv);
+  const config = await loadConfig(argv, process.env, { keyCommandStdin: process.stdin });
   if (!config.ok) {
+    if (config.exitCode !== undefined) return config.exitCode;
     console.error(config.error);
     return 1;
   }
+  const stdinWasPaused = process.stdin.isPaused();
   await runMemoryMcp(config);
+  if (stdinWasPaused) process.stdin.resume();
   return 0;
 }
