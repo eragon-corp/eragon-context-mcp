@@ -30,8 +30,6 @@ const draftFields = {
     body: { type: "string", minLength: 1, description: "Complete SKILL.md text, up to 64 KiB. Eragon adds frontmatter if absent." },
     reason: { type: "string", minLength: 1, maxLength: REASON_MAX, description: "Why the proposed change should be reviewed." },
 };
-const skillNameField = { type: "string", pattern: NAME_PATTERN, maxLength: NAME_MAX };
-const skillDescriptionField = { type: "string", minLength: 1, maxLength: DESCRIPTION_MAX };
 export const SKILL_TOOLS = [
     {
         name: "skill_list",
@@ -61,8 +59,8 @@ export const SKILL_TOOLS = [
         inputSchema: {
             type: "object",
             properties: {
-                name: { ...skillNameField, description: "Kebab-case, such as release-notes." },
-                description: skillDescriptionField,
+                name: { type: "string", pattern: NAME_PATTERN, maxLength: NAME_MAX, description: "Kebab-case, such as release-notes." },
+                description: { type: "string", minLength: 1, maxLength: DESCRIPTION_MAX },
                 ...draftFields,
                 files: fileSchema,
             },
@@ -72,15 +70,13 @@ export const SKILL_TOOLS = [
     },
     {
         name: "skill_revise",
-        description: "Propose a revision to a skill you improved, using its ID and version from skill_get. Tell the user to review the diff and accept it on Skills → Installed at the returned reviewUrl.",
+        description: "Propose a body-only revision to a skill you improved, using its ID and version from skill_get. Tell the user to review the diff and accept it on Skills → Installed at the returned reviewUrl.",
         inputSchema: {
             type: "object",
             properties: {
                 skillId: { type: "string" },
                 baseVersion: { type: "integer", minimum: 1 },
                 ...draftFields,
-                name: { ...skillNameField, description: "Only supply for an explicit rename request." },
-                description: { ...skillDescriptionField, description: "Optional description for an explicit rename request." },
             },
             required: ["skillId", "baseVersion", "body", "reason"],
             additionalProperties: false,
@@ -367,7 +363,7 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
         }
         if (name !== "skill_propose" && name !== "skill_revise")
             return errorResult(`Unknown Eragon Skills tool: ${name}`);
-        const { body, files, reason, name: skillName, description } = args;
+        const { body, files, reason } = args;
         if (!nonEmpty(body) || !nonEmpty(reason))
             return errorResult(`${name} requires a body and reason.`);
         if (Buffer.byteLength(body) > BODY_MAX_BYTES)
@@ -375,15 +371,15 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
         if (reason.length > REASON_MAX)
             return errorResult(`The proposal reason must be at most ${REASON_MAX} characters.`);
         const isNew = name === "skill_propose";
-        if ((isNew || skillName !== undefined) &&
-            (typeof skillName !== "string" || skillName.length > NAME_MAX || !NAME_REGEX.test(skillName))) {
-            return errorResult(`The skill name must be kebab-case with at most ${NAME_MAX} characters, such as release-notes.`);
-        }
-        if ((isNew || description !== undefined) && (!nonEmpty(description) || description.trim().length > DESCRIPTION_MAX)) {
-            return errorResult(`The skill description must contain 1 to ${DESCRIPTION_MAX} characters.`);
-        }
         let proposal;
         if (isNew) {
+            const { name: skillName, description } = args;
+            if (typeof skillName !== "string" || skillName.length > NAME_MAX || !NAME_REGEX.test(skillName)) {
+                return errorResult(`The skill name must be kebab-case with at most ${NAME_MAX} characters, such as release-notes.`);
+            }
+            if (!nonEmpty(description) || description.trim().length > DESCRIPTION_MAX) {
+                return errorResult(`The skill description must contain 1 to ${DESCRIPTION_MAX} characters.`);
+            }
             proposal = { name: skillName, description, body, reason };
             if (files !== undefined) {
                 if (!Array.isArray(files) || files.length > FILES_MAX || !files.every(isProposalFile)) {
@@ -402,19 +398,15 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
         else {
             if (files !== undefined)
                 return errorResult("skill_revise accepts only SKILL.md changes. Remove files and submit the updated body.");
+            if (args.name !== undefined || args.description !== undefined) {
+                return errorResult("skill_revise accepts only SKILL.md changes. Remove name and description and submit the updated body.");
+            }
             const { skillId, baseVersion } = args;
             if (!validSkillId(skillId) || typeof baseVersion !== "number" || !Number.isSafeInteger(baseVersion) || baseVersion < 1) {
                 return errorResult("skill_revise requires a skillId and an integer baseVersion from skill_get.");
             }
-            if (skillName === undefined && description !== undefined) {
-                return errorResult("Supply a description in skill_revise only with an explicit rename request.");
-            }
             // Eragon fills in the published metadata. A separate detail GET records a skill use.
             proposal = { body, reason, baseSkillId: skillId.trim(), baseVersion };
-            if (skillName !== undefined)
-                proposal.name = skillName;
-            if (description !== undefined)
-                proposal.description = description;
         }
         if (Buffer.byteLength(JSON.stringify(proposal)) > PROPOSAL_MAX_BYTES) {
             return errorResult("The JSON skill proposal must be at most 2 MiB.");

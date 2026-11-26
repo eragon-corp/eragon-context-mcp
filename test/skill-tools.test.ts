@@ -795,21 +795,39 @@ describe("Flux Skills MCP contract", () => {
     expect(gw.drafts.get(skillName)?.skillBody).toContain(`name: ${skillName}`);
   });
 
-  it("forwards name and description only for an explicit rename request", async () => {
+  it("excludes name and description from the revision schema and request", async () => {
     const gw = await gateway();
     const client = await connect(gw);
-    const name = "renamed-skill";
-    const description = "Changed description";
-    expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, description } })).toEqual(
-      toolError("Supply a description in skill_revise only with an explicit rename request."),
+    const tool = (await client.listTools()).tools.find(({ name }) => name === "skill_revise");
+    expect(Object.keys(tool?.inputSchema.properties ?? {}).sort()).toEqual(
+      ["baseVersion", "body", "reason", "skillId"],
     );
-    expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, name, description } })).toEqual(
+    for (const metadata of [{ name: "renamed-skill" }, { description: "Changed description" }]) {
+      expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, ...metadata } })).toEqual(
+        toolError("skill_revise accepts only SKILL.md changes. Remove name and description and submit the updated body."),
+      );
+    }
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(
+      jsonResult({ ...receipt, proposalId: skill.id, skillId: skill.id, kind: "revision", baseVersion: skill.version }),
+    );
+    expect(gw.requests).toEqual([
+      { method: "GET", url: "/gw/v1/skills", body: undefined },
+      { method: "POST", url: "/gw/v1/skills/proposals", body: { ...draft, baseSkillId: skill.id, baseVersion: skill.version } },
+    ]);
+  });
+
+  it("submits a revision with its own SKILL.md frontmatter", async () => {
+    const gw = await gateway();
+    const client = await connect(gw);
+    const body = "---\nname: different-name\ndescription: Updated instructions\n---\n\nNew release steps.";
+    expect(await client.callTool({ name: "skill_revise", arguments: { ...revision, body } })).toEqual(
       jsonResult({ ...receipt, proposalId: skill.id, skillId: skill.id, kind: "revision", baseVersion: skill.version }),
     );
     expect(gw.requests).toEqual([{
       method: "POST", url: "/gw/v1/skills/proposals",
-      body: { ...draft, baseSkillId: skill.id, baseVersion: skill.version, name, description },
+      body: { ...draft, body, baseSkillId: skill.id, baseVersion: skill.version },
     }]);
+    expect(gw.drafts.get(skill.name)?.skillBody).toBe(body.replace("name: different-name", `name: ${skill.name}`));
   });
 
   it("handles unchanged and pending revisions and allows another review draft to replace the first", async () => {
