@@ -5,7 +5,8 @@ export const SKILL_CALL_TIMEOUT_MS = 45_000;
 const PROBE_BACKOFF_MS = [2_000, 10_000, 60_000];
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const READ_UNAVAILABLE = "Eragon Skills are unavailable on this server or for this key.";
-const WRITE_UNAVAILABLE = "Eragon skill proposals are unavailable on this server or for this key.";
+const WRITE_UNAVAILABLE = "This key needs Memory write-back to propose Eragon skills, or this server does not accept proposals. " +
+    "The proposal tools return automatically on the next tool listing. Retry once the key and server allow proposals.";
 const NAME_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
 const NAME_MAX = 100;
 const DESCRIPTION_MAX = 500;
@@ -36,7 +37,12 @@ export const SKILL_TOOLS = [
         description: "Check Eragon Skills before redoing a known procedure. A truncated list covers the first 500 skills by name.",
         inputSchema: {
             type: "object",
-            properties: { query: { type: "string", description: "Filter names and descriptions." } },
+            properties: {
+                query: {
+                    type: "string",
+                    description: "Match every query word against the combined name and description, ignoring case. Hyphens, underscores, and whitespace separate words.",
+                },
+            },
             additionalProperties: false,
         },
     },
@@ -142,7 +148,6 @@ export async function probeSkills(config, timeoutMs = SKILL_PROBE_TIMEOUT_MS) {
 }
 export function createSkillSession(onToolsChanged) {
     let readState = "unknown";
-    let writesUnavailable = false;
     const noTools = [];
     let advertised;
     let readRefusals = 0;
@@ -151,9 +156,8 @@ export function createSkillSession(onToolsChanged) {
     let retryStep = 0;
     let retryNotBefore = 0;
     let closed = false;
-    const visibleTools = () => readState === "available" ? (writesUnavailable ? READ_TOOLS : SKILL_TOOLS) : noTools;
-    const notify = () => {
-        const visible = visibleTools();
+    const visibleTools = () => readState === "available" ? SKILL_TOOLS : noTools;
+    const notify = (visible) => {
         if (closed || advertised === undefined || advertised === visible)
             return;
         advertised = visible;
@@ -166,7 +170,6 @@ export function createSkillSession(onToolsChanged) {
     };
     const markAbsent = () => {
         readState = "absent";
-        writesUnavailable = false;
         readRefusals += 1;
         resetRetry();
     };
@@ -183,7 +186,7 @@ export function createSkillSession(onToolsChanged) {
                 retryTimer.unref();
             }
             else if (!closed) {
-                void refresh(config, SKILL_PROBE_TIMEOUT_MS).then(notify);
+                void refresh(config, SKILL_PROBE_TIMEOUT_MS).then(() => notify(visibleTools()));
             }
         };
         wake();
@@ -229,12 +232,15 @@ export function createSkillSession(onToolsChanged) {
         return inFlight;
     }
     const unavailable = (route) => {
-        if (route === "read")
+        if (route === "read") {
             markAbsent();
-        else if (readState !== "absent")
-            writesUnavailable = true;
-        notify();
-        return textResult(route === "read" ? READ_UNAVAILABLE : WRITE_UNAVAILABLE);
+            notify(noTools);
+            return textResult(READ_UNAVAILABLE);
+        }
+        // A proposal refusal only changes the tools already advertised in this session.
+        if (readState === "available")
+            notify(READ_TOOLS);
+        return textResult(WRITE_UNAVAILABLE);
     };
     return {
         async list(config, timeoutMs = SKILL_PROBE_TIMEOUT_MS) {
@@ -246,8 +252,6 @@ export function createSkillSession(onToolsChanged) {
         async call(name, args, config, deadline) {
             if (readState === "absent")
                 return textResult(READ_UNAVAILABLE);
-            if (writesUnavailable && isWriter(name))
-                return textResult(WRITE_UNAVAILABLE);
             return callSkillTool(name, args, config, unavailable, deadline);
         },
         close() {
@@ -337,10 +341,13 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
             const list = skillList(response.body);
             if (list === undefined)
                 return errorResult("Eragon returned an invalid skill list.");
-            const term = query?.trim().toLowerCase() ?? "";
+            const words = (query ?? "").toLowerCase().split(/[-_\s]+/).filter(Boolean);
             return textResult(JSON.stringify({
                 ...list,
-                skills: list.skills.filter((skill) => skill.name.toLowerCase().includes(term) || skill.description.toLowerCase().includes(term)),
+                skills: list.skills.filter(({ name, description }) => {
+                    const text = `${name} ${description}`.toLowerCase();
+                    return words.every((word) => text.includes(word));
+                }),
             }, null, 2));
         }
         if (name === "skill_get") {

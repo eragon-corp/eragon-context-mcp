@@ -42,13 +42,14 @@ availability and triggers a background retry with backoff and any
 The first listing can also retry once within its five-second budget.
 
 A key with Skills access needs Memory write-back (`memory:write`) to propose
-changes. If the Gateway hides the proposal route, the bridge skips the call
-and hides both proposal tools while skill reads remain available. Start a
-fresh bridge session after adding the write grant.
+changes. If the Gateway returns an unknown-path response for a proposal, the
+bridge hides both proposal tools from the current listing and keeps skill reads
+available. The next tool listing offers both proposal tools again whenever skill
+reads are available. A direct proposal call can also retry in the same session.
 
 | Tool | Arguments and result |
 |---|---|
-| `skill_list` | Check before redoing a known procedure. Optional `query` filters names and descriptions locally. `truncated: true` means the Gateway returned the first 500 skills by name, even if the filter finds none. |
+| `skill_list` | Check before redoing a known procedure. Optional `query` requires every word to appear somewhere in the name or description, ignoring case. Hyphens, underscores, and whitespace separate query words. `truncated: true` means the Gateway returned the first 500 skills by name, even if the filter finds none. |
 | `skill_get` | Pass `idOrName` for the published version, `SKILL.md` as `body`, and a list of companion files. Add a bundle-relative `path` to read a text file up to 256 KiB. |
 | `skill_propose` | Propose a reusable procedure with a kebab-case `name`, `description`, `body`, `reason`, and optional `files` with `path` and `content`. |
 | `skill_revise` | Propose a body-only improvement. Pass `skillId` and `baseVersion` from `skill_get`, the new `body`, and a `reason`. Companion files carry over. |

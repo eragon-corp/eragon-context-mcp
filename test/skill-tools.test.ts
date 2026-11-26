@@ -15,12 +15,15 @@ const token = "test-flux-key";
 const memoryTools = ["memory_search", "memory_save", "memory_share"];
 const skillTools = ["skill_list", "skill_get", "skill_propose", "skill_revise"];
 const allTools = [...memoryTools, ...skillTools];
-const readTools = [...memoryTools, "skill_list", "skill_get"];
 const unknownRoute = {
   type: "error", error: { type: "not_found_error", message: "unknown gateway path" }, request_id: "req_skills",
 };
 const skillsUnavailable = { content: [{ type: "text", text: "Eragon Skills are unavailable on this server or for this key." }] };
-const proposalsUnavailable = { content: [{ type: "text", text: "Eragon skill proposals are unavailable on this server or for this key." }] };
+const proposalsUnavailable = { content: [{
+  type: "text",
+  text: "This key needs Memory write-back to propose Eragon skills, or this server does not accept proposals. " +
+    "The proposal tools return automatically on the next tool listing. Retry once the key and server allow proposals.",
+}] };
 const skill = {
   id: "skl_1",
   name: "release-notes",
@@ -460,33 +463,61 @@ describe("Flux Skills MCP contract", () => {
     }
   });
 
-  it("hides only writers after a proposal's unknown-route 404 and keeps reads available", async () => {
+  it("re-lists both writers and accepts a proposal after Memory write-back is enabled in the same session", async () => {
     const state: Parameters<typeof gateway>[0] = { memoryWrite: false };
     const gw = await gateway(state);
     const client = await connect(gw);
     const changes: string[] = [];
     client.setNotificationHandler(ToolListChangedNotificationSchema, ({ method }) => { changes.push(method); });
     expect(await toolNames(client)).toEqual(allTools);
-    expect(await client.callTool({ name: "skill_list" })).toMatchObject({
-      content: [{ type: "text", text: expect.stringContaining(skill.name) }],
-    });
+    expect(await client.callTool({ name: "skill_list" })).toEqual(jsonResult({ skills: [skill] }));
     expect(await client.callTool({ name: "memory_save", arguments: save })).toEqual({
       isError: true, content: [{ type: "text", text: "this gateway key cannot write Eragon Memory" }],
     });
     expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(proposalsUnavailable);
     expect(changes).toEqual(["notifications/tools/list_changed"]);
-    expect(await toolNames(client)).toEqual(readTools);
-    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(proposalsUnavailable);
-    expect(gw.requests.filter(({ url }) => url === "/gw/v1/skills/proposals")).toHaveLength(1);
-    expect(gw.requests.some(({ url }) => url === "/gw/v1/skills/skl_1")).toBe(false);
+    expect(await client.callTool({ name: "skill_list" })).toEqual(jsonResult({ skills: [skill] }));
+    expect(await client.callTool({ name: "skill_get", arguments: { idOrName: skill.id, path: filePath } })).toEqual({
+      content: [{ type: "text", text: fileContent }],
+    });
     expect(await client.callTool({ name: "memory_search", arguments: { query: "release" } })).toMatchObject({
       content: [{ type: "text", text: expect.stringContaining("mem_1") }],
     });
     state.memoryWrite = true;
-    expect(await toolNames(client)).toEqual(readTools);
-    const freshClient = await connect(gw);
-    expect(await toolNames(freshClient)).toEqual(allTools);
-    expect(await freshClient.callTool({ name: "skill_propose", arguments: proposal })).toEqual(jsonResult(receipt));
+    expect(await toolNames(client)).toEqual(allTools);
+    expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(jsonResult(receipt));
+    expect(await client.callTool({ name: "skill_list" })).toEqual(jsonResult({ skills: [skill] }));
+    expect(gw.requests.filter(({ url }) => url === "/gw/v1/skills/proposals")).toHaveLength(2);
+  });
+
+  it("retries writers before and after re-listing while the Gateway still refuses proposals", async () => {
+    const gw = await gateway({ memoryWrite: false });
+    const client = await connect(gw);
+    const changes: string[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, ({ method }) => { changes.push(method); });
+    const postRequests = () => gw.requests.filter(({ url }) => url === "/gw/v1/skills/proposals");
+
+    expect(await toolNames(client)).toEqual(allTools);
+    expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(proposalsUnavailable);
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(proposalsUnavailable);
+    expect(postRequests()).toHaveLength(2);
+    expect(changes).toEqual(["notifications/tools/list_changed"]);
+
+    expect(await toolNames(client)).toEqual(allTools);
+    expect(await client.callTool({ name: "skill_propose", arguments: proposal })).toEqual(proposalsUnavailable);
+    expect(postRequests()).toHaveLength(3);
+    expect(changes).toHaveLength(2);
+    expect(await client.callTool({ name: "skill_list" })).toEqual(jsonResult({ skills: [skill] }));
+  });
+
+  it("matches every query word across the skill name and description", async () => {
+    const client = await connect(await gateway());
+    for (const query of ["release notes", "-- DEPLOYS_Notes\trelease -_", "- _ -"]) {
+      expect(await client.callTool({ name: "skill_list", arguments: { query } })).toEqual(jsonResult({ skills: [skill] }));
+    }
+    expect(await client.callTool({ name: "skill_list", arguments: { query: "release-notes_missing" } })).toEqual(
+      jsonResult({ skills: [] }),
+    );
   });
 
   it("filters the list locally and reads a skill by name or an exact text file by ID", async () => {
