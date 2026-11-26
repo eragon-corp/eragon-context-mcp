@@ -14,7 +14,9 @@ Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
   ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
 
-The server exposes exactly three stdio MCP tools: memory_search, memory_save and memory_share.`;
+The server exposes memory_search, memory_save and memory_share over stdio.
+When the Gateway enables Skills for this key, it also exposes skill_list,
+skill_get, skill_propose and skill_revise.`;
 function explicitUrl(argv) {
     for (let index = 0; index < argv.length; index += 1) {
         const argument = argv[index];

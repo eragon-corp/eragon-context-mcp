@@ -6,8 +6,12 @@ export type GatewayRequest = {
     gatewayUrl: string;
     token: string;
     path: string;
-    body: unknown;
+    method?: "GET" | "POST";
+    body?: unknown;
     fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+    responseType?: "text";
+    retryOnNetworkError?: boolean;
 };
-export declare function requestGateway({ gatewayUrl, token, path, body, fetchImpl, }: GatewayRequest): Promise<GatewayResponse>;
+export declare function requestGateway({ gatewayUrl, token, path, method, body, fetchImpl, timeoutMs, responseType, retryOnNetworkError, }: GatewayRequest): Promise<GatewayResponse>;
 //# sourceMappingURL=client.d.ts.map

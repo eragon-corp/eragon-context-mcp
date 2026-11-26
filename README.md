@@ -3,7 +3,7 @@
 Connect coding agents to the key owner's Eragon Memory through a narrow local
 MCP bridge.
 
-The bridge exposes exactly three tools:
+The bridge exposes three Memory tools:
 
 - `memory_search` searches permission-filtered General Memory.
 - `memory_save` writes durable facts, preferences, procedures, or contacts to
@@ -31,6 +31,38 @@ present in the coding agent's environment.
 - **Allow Memory write-back** enabled for `memory_save` and `memory_share`
 
 Use an HTTPS Gateway URL outside isolated local testing.
+
+## Skills
+
+Each MCP tool listing checks `GET /gw/v1/skills` with the same Gateway key.
+A successful response, including an empty list, enables Skills. A key with
+Skills access needs Memory write-back (`memory:write`) to propose changes.
+If the Gateway hides the proposal route, the bridge skips the call and hides
+both proposal tools for the session while skill reads remain available.
+
+| Tool | Arguments and result |
+|---|---|
+| `skill_list` | Check before redoing a known procedure. Optional `query` filters names and descriptions locally. `truncated: true` means the Gateway returned the first 500 skills by name, even if the filter finds none. |
+| `skill_get` | Pass `idOrName` for the published version, `SKILL.md` as `body`, and a list of companion files. Add a bundle-relative `path` to read a text file up to 256 KiB. |
+| `skill_propose` | Propose a reusable procedure with a kebab-case `name`, `description`, `body`, `reason`, and optional `files` with `path` and `content`. |
+| `skill_revise` | Propose a body-only improvement. Pass `skillId` and `baseVersion` from `skill_get`, the new `body`, and a `reason`. The published name and companion files stay as they are. |
+
+Proposals wait on **Skills → Installed**. The key owner can **Publish** a new
+skill or review the diff and **Accept revision** to apply a draft. The receipt
+returns the skill ID as both `proposalId` and `skillId`, the `kind`
+(`skill` or `revision`), and the `reviewUrl` (which may be `/skills/installed`).
+Revision receipts also return `baseVersion`.
+
+New skill names use lowercase letters and digits separated by single hyphens,
+up to 100 characters. The description limit is 500 characters. A proposal
+body is limited to 64 KiB, its reason to 1–2000 characters, and a new skill's
+files to 50 files totaling 1 MiB. The whole JSON request is limited to 2 MiB.
+Eragon adds name and description frontmatter when the body arrives without it.
+
+The bridge retries a new skill proposal once if the connection fails before
+any response, using the identical request. If the published version changes
+during a revision, call `skill_get` again, reconcile the changes, and retry
+`skill_revise` once.
 
 ## Install from GitHub
 
