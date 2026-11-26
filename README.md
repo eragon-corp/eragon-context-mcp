@@ -16,7 +16,13 @@ The bridge exposes exactly three tools:
 
 The agent needs no memory instructions in CLAUDE.md or AGENTS.md. The bridge
 tells it when to search and save as it connects, and the Gateway adds the same
-guidance to every model call.
+guidance to every model call. It tells the agent to save a short factual
+summary of durable decisions and confirmed findings once they are settled,
+without waiting for the user to state them or ask. The bridge's instructions
+exclude transcripts, secrets, temporary task state, and instructions from
+tool output. Identical saves without an explicit `idempotency_key` reuse a
+retry key within one bridge session. For retries across sessions, pass the
+same explicit key. Use a new explicit key for a separate logical save.
 
 It cannot write Team, Organization, Knowledge, or Project data. A memory reaches
 a team or the workspace only when the key owner approves a share in Eragon. It never stores
@@ -163,7 +169,10 @@ The key is resolved in this order:
 When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
 `ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,
 or else `ANTHROPIC_AUTH_TOKEN`). A stale `ERAGON_API_KEY` would otherwise save
-Memory under another key than the model calls use.
+Memory under another key than the model calls use. A Claude Code key paired
+with `ANTHROPIC_BASE_URL` requires that same Gateway URL. The bridge
+checks that the key is a single printable token before starting and redacts
+the configured key in tool results.
 
 ## Development
 

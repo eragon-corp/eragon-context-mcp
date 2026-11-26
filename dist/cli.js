@@ -55,6 +55,9 @@ export function resolveConfig(argv, environment = process.env) {
             error: "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN to a personal Gateway key.",
         };
     }
+    if (/[^!-~]/.test(token)) {
+        return { ok: false, error: "The Gateway key must be a single printable token." };
+    }
     let parsed;
     try {
         parsed = new URL(gatewayUrl);
@@ -64,6 +67,11 @@ export function resolveConfig(argv, environment = process.env) {
     }
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
         return { ok: false, error: "The Eragon Gateway URL must use HTTPS or HTTP." };
+    }
+    if (modelKey !== undefined &&
+        environment.ANTHROPIC_BASE_URL !== undefined &&
+        URL.parse(environment.ANTHROPIC_BASE_URL)?.href.replace(/\/+$/, "") !== parsed.href.replace(/\/+$/, "")) {
+        return { ok: false, error: "Use the Claude Code Gateway URL with its inherited key." };
     }
     return { ok: true, gatewayUrl: gatewayUrl.replace(/\/+$/, ""), token };
 }

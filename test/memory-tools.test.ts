@@ -112,32 +112,25 @@ describe("memory_save", () => {
     });
   });
 
-  it("uses the MCP request identity when the caller omits an idempotency key", async () => {
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ memory: { id: "mem_3", outcome: "created" } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
+  it("uses the normalized save and the MCP session when the caller omits an idempotency key", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ memory: { id: "mem_3", outcome: "created" } })),
     );
+    const config = { gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret", fetchImpl };
+    const args = { kind: "fact", title: "Timezone", content: "Asia/Dubai" };
+    await callMemoryTool("memory_save", args, config, "session");
+    await callMemoryTool("memory_save", { ...args, title: " Timezone " }, config, "session");
+    await callMemoryTool("memory_save", { ...args, content: "Europe/Dublin" }, config, "session");
+    await callMemoryTool("memory_save", { ...args, memory_id: "mem_target" }, config, "session");
+    await callMemoryTool("memory_save", args, config, "new-session");
+    await callMemoryTool("memory_save", { ...args, idempotency_key: "caller-key" }, config, "session");
 
-    await callMemoryTool(
-      "memory_save",
-      { kind: "fact", title: "Timezone", content: "Asia/Dubai" },
-      { gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret", fetchImpl },
-      "mcp:session:request",
-    );
-
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "https://s.eragon.ai/gw/v1/memory",
-      expect.objectContaining({
-        body: JSON.stringify({
-          kind: "fact",
-          title: "Timezone",
-          content: "Asia/Dubai",
-          idempotencyKey: "mcp:session:request",
-        }),
-      }),
-    );
+    const [first, retry, changed, correction, otherSession, explicit] = fetchImpl.mock.calls.map(([, init]) =>
+      JSON.parse(String(init?.body)).idempotencyKey);
+    expect(first).toMatch(/^mcp:session:[a-f0-9]{64}$/);
+    expect(retry).toBe(first);
+    expect(new Set([first, changed, correction, otherSession]).size).toBe(4);
+    expect(explicit).toBe("caller-key");
   });
 
   it("returns the Gateway's permission error without exposing the credential", async () => {
@@ -177,21 +170,20 @@ describe("memory_save corrections", () => {
       "memory_save",
       { kind: "fact", title: "Deploy day", content: "Deploys are on Friday.", memory_id: " mem_old " },
       { gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret", fetchImpl },
-      "mcp:session:request",
+      "session",
     );
 
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://s.eragon.ai/gw/v1/memory",
-      expect.objectContaining({
-        body: JSON.stringify({
-          kind: "fact",
-          title: "Deploy day",
-          content: "Deploys are on Friday.",
-          idempotencyKey: "mcp:session:request",
-          memoryId: "mem_old",
-        }),
-      }),
+      expect.objectContaining({ method: "POST" }),
     );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toEqual({
+      kind: "fact",
+      title: "Deploy day",
+      content: "Deploys are on Friday.",
+      idempotencyKey: expect.stringMatching(/^mcp:session:[a-f0-9]{64}$/),
+      memoryId: "mem_old",
+    });
   });
 
   it("rejects an empty memory_id without calling the Gateway", async () => {
