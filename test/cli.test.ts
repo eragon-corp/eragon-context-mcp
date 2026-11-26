@@ -29,6 +29,50 @@ describe("resolveConfig", () => {
     });
   });
 
+  it("refuses to forward an inherited Claude Code key to a different Gateway", () => {
+    const result = resolveConfig(["--url", "https://second.example/gw"], {
+      ANTHROPIC_BASE_URL: "https://first.example/gw",
+      ANTHROPIC_AUTH_TOKEN: "first-gateway-key",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      error: expect.stringContaining("Claude Code Gateway URL"),
+    });
+  });
+
+  it.each([
+    {
+      path: "an explicit HTTPS URL",
+      argv: ["--url", "https://s.eragon.ai/gw"],
+      environment: { ANTHROPIC_API_KEY: "fixture-anthropic-api-key" },
+    },
+    {
+      path: "a non-local HTTP URL from the environment",
+      argv: [],
+      environment: { ERAGON_GATEWAY_URL: "http://other.example/gw", ANTHROPIC_AUTH_TOKEN: "fixture-anthropic-auth-token" },
+    },
+  ])("requires ERAGON_API_KEY for $path when Claude Code uses Anthropic directly", ({ argv, environment }) => {
+    const result = resolveConfig(argv, environment);
+
+    expect(result).toEqual({ ok: false, error: expect.stringContaining("Set ERAGON_API_KEY") });
+    expect(JSON.stringify(result)).not.toContain("fixture-anthropic");
+  });
+
+  it("uses a Codex ERAGON_API_KEY with --url", () => {
+    expect(resolveConfig(["--url", "https://s.eragon.ai/gw"], { ERAGON_API_KEY: "codex-key" }))
+      .toEqual({ ok: true, gatewayUrl: "https://s.eragon.ai/gw", token: "codex-key" });
+  });
+
+  it("accepts equivalent spellings of the Claude Code Gateway URL", () => {
+    const result = resolveConfig(["--url", "https://tenant.example/gw"], {
+      ANTHROPIC_BASE_URL: "https://TENANT.example:443/gw/",
+      ANTHROPIC_API_KEY: "claude-code-key",
+    });
+
+    expect(result).toEqual({ ok: true, gatewayUrl: "https://tenant.example/gw", token: "claude-code-key" });
+  });
+
   it("uses the key the Connect page gives Claude Code in ANTHROPIC_AUTH_TOKEN", () => {
     expect(
       resolveConfig([], {
@@ -36,6 +80,30 @@ describe("resolveConfig", () => {
         ANTHROPIC_AUTH_TOKEN: "model-key",
       }),
     ).toEqual({ ok: true, gatewayUrl: "https://s.eragon.ai/gw", token: "model-key" });
+  });
+
+  it("rejects multiline credentials before the server can advertise Memory tools", () => {
+    const result = resolveConfig([], {
+      ERAGON_GATEWAY_URL: "http://127.0.0.1:1/gw",
+      ERAGON_API_KEY: "fixture-key\nhelper diagnostics",
+    });
+
+    expect(result).toEqual({ ok: false, error: "The Gateway key must be a single printable token." });
+  });
+
+  it("normalizes whitespace around both keys before checking they match", () => {
+    expect(resolveConfig([], {
+      ANTHROPIC_BASE_URL: "https://s.eragon.ai/gw",
+      ANTHROPIC_AUTH_TOKEN: "model-key\n",
+      ERAGON_API_KEY: " model-key ",
+    })).toEqual({ ok: true, gatewayUrl: "https://s.eragon.ai/gw", token: "model-key" });
+  });
+
+  it("normalizes an inherited Flux key and the equivalent Gateway URL with trailing slashes", () => {
+    expect(resolveConfig(["--url=https://s.eragon.ai/gw/"], {
+      ANTHROPIC_BASE_URL: "HTTPS://S.ERAGON.AI:443/gw//",
+      ANTHROPIC_API_KEY: " flux-key\r\n",
+    })).toEqual({ ok: true, gatewayUrl: "https://s.eragon.ai/gw", token: "flux-key" });
   });
 
   it("refuses to save Memory under a different key than the model calls use", () => {

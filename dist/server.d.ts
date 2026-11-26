@@ -1,6 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { type MemoryToolConfig } from "./memory-tools.js";
-export declare function fallbackIdempotencyKey(sessionId: string, requestId: string | number): string;
 /**
  * What the agent is told about Memory when it connects, so nobody has to put
  * the same thing in CLAUDE.md or AGENTS.md. The gateway adds a matching

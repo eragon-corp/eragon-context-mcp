@@ -5,5 +5,5 @@ export type MemoryToolConfig = {
     token: string;
     fetchImpl?: typeof fetch;
 };
-export declare function callMemoryTool(name: string, args: Record<string, unknown>, config: MemoryToolConfig, fallbackIdempotencyKey?: string): Promise<CallToolResult>;
+export declare function callMemoryTool(name: string, args: Record<string, unknown>, config: MemoryToolConfig, sessionId?: string): Promise<CallToolResult>;
 //# sourceMappingURL=memory-tools.d.ts.map

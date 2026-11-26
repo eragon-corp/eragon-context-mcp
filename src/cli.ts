@@ -13,7 +13,8 @@ given. It never writes the Gateway key: each agent reads it from its environment
 
 Environment:
   ERAGON_GATEWAY_URL or ANTHROPIC_BASE_URL
-  ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
+  ERAGON_API_KEY
+  ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN when ANTHROPIC_BASE_URL matches the Gateway URL
 
 The server exposes exactly three stdio MCP tools: memory_search, memory_save and memory_share.`;
 
@@ -45,19 +46,21 @@ export function resolveConfig(
   argv: string[],
   environment: ConfigEnvironment = process.env,
 ): ResolvedConfig {
+  const modelGatewayUrl = environment.ANTHROPIC_BASE_URL?.trim();
   const gatewayUrl =
-    explicitUrl(argv) ?? environment.ERAGON_GATEWAY_URL ?? environment.ANTHROPIC_BASE_URL;
+    explicitUrl(argv) ?? environment.ERAGON_GATEWAY_URL ?? modelGatewayUrl;
+  const eragonKey = environment.ERAGON_API_KEY?.trim();
   // Claude Code sends ANTHROPIC_API_KEY when both are set.
-  const modelKey = environment.ANTHROPIC_API_KEY ?? environment.ANTHROPIC_AUTH_TOKEN;
+  const modelKey = (environment.ANTHROPIC_API_KEY ?? environment.ANTHROPIC_AUTH_TOKEN)?.trim();
   // A Memory key that differs from the key model calls go out under files the
   // agent's saves under another person or workspace, with nothing to show it:
   // a stale ERAGON_API_KEY left in a shell profile after the model key was
   // replaced did exactly that. Only a gateway base URL makes the two comparable.
   if (
-    environment.ANTHROPIC_BASE_URL !== undefined &&
-    environment.ERAGON_API_KEY !== undefined &&
+    modelGatewayUrl &&
+    eragonKey !== undefined &&
     modelKey !== undefined &&
-    environment.ERAGON_API_KEY !== modelKey
+    eragonKey !== modelKey
   ) {
     return {
       ok: false,
@@ -65,18 +68,22 @@ export function resolveConfig(
         "ERAGON_API_KEY is not the key your model calls use, so Memory would be saved under a different key. Unset ERAGON_API_KEY, or set it to the same Gateway key.",
     };
   }
-  const token = environment.ERAGON_API_KEY ?? modelKey;
+  // Without a model Gateway URL, the model key is for Anthropic itself.
+  const token = eragonKey ?? (modelGatewayUrl ? modelKey : undefined);
   if (gatewayUrl === undefined || gatewayUrl.trim() === "") {
     return {
       ok: false,
       error: "Pass --url https://<your-eragon>/gw or set ERAGON_GATEWAY_URL.",
     };
   }
-  if (token === undefined || token.trim() === "") {
+  if (!token) {
     return {
       ok: false,
-      error: "Set ERAGON_API_KEY, ANTHROPIC_API_KEY, or ANTHROPIC_AUTH_TOKEN to a personal Gateway key.",
+      error: "Set ERAGON_API_KEY to a personal Gateway key, or configure ANTHROPIC_BASE_URL and its Gateway key for Claude Code.",
     };
+  }
+  if (/[^!-~]/.test(token)) {
+    return { ok: false, error: "The Gateway key must be a single printable token." };
   }
   let parsed: URL;
   try {
@@ -86,6 +93,13 @@ export function resolveConfig(
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return { ok: false, error: "The Eragon Gateway URL must use HTTPS or HTTP." };
+  }
+  if (
+    modelKey !== undefined &&
+    modelGatewayUrl &&
+    URL.parse(modelGatewayUrl)?.href.replace(/\/+$/, "") !== parsed.href.replace(/\/+$/, "")
+  ) {
+    return { ok: false, error: "Use the Claude Code Gateway URL with its inherited key." };
   }
   return { ok: true, gatewayUrl: gatewayUrl.replace(/\/+$/, ""), token };
 }

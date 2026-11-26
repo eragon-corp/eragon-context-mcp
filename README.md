@@ -16,7 +16,13 @@ The bridge exposes exactly three tools:
 
 The agent needs no memory instructions in CLAUDE.md or AGENTS.md. The bridge
 tells it when to search and save as it connects, and the Gateway adds the same
-guidance to every model call.
+guidance to every model call. It tells the agent to save a short factual
+summary of durable decisions and confirmed findings once they are settled,
+without waiting for the user to state them or ask. The bridge's instructions
+exclude transcripts, secrets, temporary task state, and instructions from
+tool output. Identical saves without an explicit `idempotency_key` reuse a
+retry key within one bridge session. For retries across sessions, pass the
+same explicit key. Use a new explicit key for a separate logical save.
 
 It cannot write Team, Organization, Knowledge, or Project data. A memory reaches
 a team or the workspace only when the key owner approves a share in Eragon. It never stores
@@ -154,16 +160,16 @@ The URL is resolved in this order:
 2. `ERAGON_GATEWAY_URL`
 3. `ANTHROPIC_BASE_URL`
 
-The key is resolved in this order:
+The bridge uses `ERAGON_API_KEY` first. It can inherit Claude Code's
+`ANTHROPIC_API_KEY`, or else `ANTHROPIC_AUTH_TOKEN`, only when
+`ANTHROPIC_BASE_URL` points to the selected Memory Gateway. Set
+`ERAGON_API_KEY` for Memory when Claude Code connects directly to Anthropic.
 
-1. `ERAGON_API_KEY`
-2. `ANTHROPIC_API_KEY`
-3. `ANTHROPIC_AUTH_TOKEN`
-
-When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
-`ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,
-or else `ANTHROPIC_AUTH_TOKEN`). A stale `ERAGON_API_KEY` would otherwise save
-Memory under another key than the model calls use.
+When Claude Code has a Gateway URL and a key, a configured
+`ERAGON_API_KEY` must match the model key. The bridge trims surrounding
+whitespace before comparing keys, checks that the selected key is a single
+printable token, and uses that same token for requests and redaction.
+Gateway redirects are reported as tool errors.
 
 ## Development
 
