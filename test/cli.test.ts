@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -293,9 +294,14 @@ describe("the bridge as an MCP client starts it", () => {
     expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "eragon-context" } } });
   });
 
-  it.skipIf(process.platform === "win32").each(["stdin EOF", "SIGTERM"])(
+  it.skipIf(process.platform === "win32").each([
+    ["stdin EOF", 0],
+    ["SIGTERM", 143],
+    ["Claude Code's SIGINT shutdown sequence", 130],
+    ["SIGHUP", 129],
+  ] as const)(
     "stops the helper tree promptly on %s during startup",
-    async (shutdown) => {
+    async (shutdown, exitCode) => {
       const dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
       const pidFile = join(dir, "pids");
       // The shell stays alive as a parent because it has another command to run.
@@ -320,11 +326,23 @@ describe("the bridge as an MCP client starts it", () => {
         const [helperPid, childPid] = pids;
         // The client may have sent initialize already when it closes its pipe.
         bridge.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
-        if (shutdown === "stdin EOF") bridge.stdin.end();
-        else bridge.kill("SIGTERM");
+        if (shutdown === "stdin EOF") {
+          bridge.stdin.end();
+        } else if (shutdown === "Claude Code's SIGINT shutdown sequence") {
+          bridge.kill("SIGINT");
+          await delay(100);
+          if (!bridgeExited) {
+            bridge.kill("SIGTERM");
+            await delay(400);
+            if (!bridgeExited) bridge.kill("SIGKILL");
+          }
+        } else {
+          bridge.kill(shutdown);
+        }
         await expect.poll(() => ({ bridgeExited, helperRunning: running(helperPid), childRunning: running(childPid) }), {
           timeout: 1500,
         }).toEqual({ bridgeExited: true, helperRunning: false, childRunning: false });
+        expect(await closed).toEqual([exitCode, null]);
       } finally {
         if (pids !== undefined && pids.some(running)) process.kill(-pids[0], "SIGKILL");
         if (!bridgeExited) bridge.kill("SIGKILL");

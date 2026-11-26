@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import { AGENTS, install } from "./install.js";
 import { runMemoryMcp } from "./server.js";
@@ -133,13 +134,16 @@ function keyFromCommand(command, environment, timeoutMs, stdin) {
         let settled = false;
         const queuedInput = [];
         let queuedBytes = 0;
+        const windows = process.platform === "win32";
+        const shutdownSignals = windows ? ["SIGTERM"] : ["SIGTERM", "SIGINT", "SIGHUP"];
         const finish = (result) => {
             if (settled)
                 return;
             settled = true;
             clearTimeout(timer);
             if (stdin !== undefined) {
-                process.off("SIGTERM", terminate);
+                for (const signal of shutdownSignals)
+                    process.off(signal, terminate);
                 stdin.off("end", disconnect).off("close", disconnect).off("error", disconnect).off("data", queueInput);
                 stdin.pause();
                 // Put early JSON-RPC messages back in front of anything still unread by the transport.
@@ -149,7 +153,6 @@ function keyFromCommand(command, environment, timeoutMs, stdin) {
             }
             resolve(result);
         };
-        const windows = process.platform === "win32";
         const child = spawn(command, {
             shell: true,
             env: environment,
@@ -167,7 +170,11 @@ function keyFromCommand(command, environment, timeoutMs, stdin) {
             stop({ ok: false, error: `The key command did not finish within ${timeoutMs / 1000} s.` });
         }, timeoutMs);
         const disconnect = () => stop({ ok: false, error: "MCP stdin closed during startup.", exitCode: 0 });
-        const terminate = () => stop({ ok: false, error: "The bridge was terminated during startup.", exitCode: 143 });
+        const terminate = (signal) => stop({
+            ok: false,
+            error: "The bridge was terminated during startup.",
+            exitCode: 128 + osConstants.signals[signal],
+        });
         const queueInput = (chunk) => {
             queuedBytes += chunk.length;
             if (queuedBytes > STDIO_DEFAULT_MAX_BUFFER_SIZE) {
@@ -178,7 +185,8 @@ function keyFromCommand(command, environment, timeoutMs, stdin) {
             }
         };
         if (stdin !== undefined) {
-            process.once("SIGTERM", terminate);
+            for (const signal of shutdownSignals)
+                process.once(signal, terminate);
             // Drain stdin so EOF is detectable even if the client already sent initialize.
             stdin.once("end", disconnect).once("close", disconnect).once("error", disconnect).on("data", queueInput);
         }

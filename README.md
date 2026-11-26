@@ -190,11 +190,17 @@ The key is resolved in this order:
 The key command runs only when none of the three variables is set, so an
 exported key always wins. It runs through the shell, as Claude Code runs
 `apiKeyHelper`, and must print one key within 15 seconds. The bridge stops the
-command and its children at the deadline or if, while waiting for the key,
-the MCP client closes stdin or sends `SIGTERM`. The bridge never logs what it
-printed. On Windows, `install` refuses a key command with `%`, double quotes
-or line breaks, because cmd.exe would change it: put it in a script instead. `install --key-command` writes the command, and the URL
-it belongs to, into each agent's entry.
+command and its children at the deadline or when the MCP client closes stdin
+during startup. On macOS and Linux, `SIGINT`, `SIGHUP`, and `SIGTERM` also stop
+the command during startup and exit with status 130, 129, and 143, respectively.
+For a manual startup check, keep stdin open until the bridge answers
+`initialize`. If stdin closes during key lookup, the bridge exits with status 0
+before answering.
+
+The bridge never logs what the key command printed. On Windows, `install`
+refuses a key command with `%`, double quotes or line breaks because cmd.exe
+would change it. Put such a command in a script. `install --key-command`
+writes the command and its Gateway URL into each agent's entry.
 
 When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
 `ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,

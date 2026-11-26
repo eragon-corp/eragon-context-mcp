@@ -3,7 +3,7 @@ type ConfigEnvironment = Partial<Record<"ERAGON_GATEWAY_URL" | "ANTHROPIC_BASE_U
 type ConfigError = {
     ok: false;
     error: string;
-    exitCode?: 0 | 143;
+    exitCode?: number;
 };
 export type ResolvedConfig = {
     ok: true;
