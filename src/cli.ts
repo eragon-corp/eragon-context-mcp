@@ -16,8 +16,9 @@ Environment:
   ERAGON_API_KEY     or ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
 
 The server exposes memory_search, memory_save and memory_share over stdio.
-When the Gateway enables Skills for this key, it also exposes skill_list,
-skill_get, skill_propose and skill_revise.`;
+With Skills read access, it also exposes skill_list and skill_get.
+Proposing changes with skill_propose and skill_revise also requires Memory
+write-back.`;
 
 type ConfigEnvironment = Partial<
   Record<

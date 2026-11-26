@@ -258,14 +258,14 @@ export function createSkillSession(onToolsChanged: () => void) {
     return inFlight;
   }
 
-  const unavailable = (route: "read" | "write") => {
+  const unavailable = (route: "read" | "write", refusalsAtStart: number) => {
     if (route === "read") {
       markAbsent();
       notify(noTools);
       return textResult(READ_UNAVAILABLE);
     }
-    // A proposal refusal only changes the tools already advertised in this session.
-    if (readState === "available") notify(READ_TOOLS);
+    // Only proposal calls started after the latest read refusal can hide writers.
+    if (readState === "available" && refusalsAtStart === readRefusals) notify(READ_TOOLS);
     return textResult(WRITE_UNAVAILABLE);
   };
 
@@ -277,7 +277,8 @@ export function createSkillSession(onToolsChanged: () => void) {
     },
     async call(name: string, args: Record<string, unknown>, config: SkillConfig, deadline?: number): Promise<CallToolResult> {
       if (readState === "absent") return textResult(READ_UNAVAILABLE);
-      return callSkillTool(name, args, config, unavailable, deadline);
+      const refusalsAtStart = readRefusals;
+      return callSkillTool(name, args, config, (route) => unavailable(route, refusalsAtStart), deadline);
     },
     close(): void {
       closed = true;

@@ -46,6 +46,8 @@ changes. If the Gateway returns an unknown-path response for a proposal, the
 bridge hides both proposal tools from the current listing and keeps skill reads
 available. The next tool listing offers both proposal tools again whenever skill
 reads are available. A direct proposal call can also retry in the same session.
+After a Skills read refusal, only proposal calls started after that refusal can
+hide the proposal tools.
 
 | Tool | Arguments and result |
 |---|---|

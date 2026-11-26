@@ -510,6 +510,45 @@ describe("Flux Skills MCP contract", () => {
     expect(await client.callTool({ name: "skill_list" })).toEqual(jsonResult({ skills: [skill] }));
   });
 
+  it("ignores stale proposal refusals after Skills reads recover and applies fresh refusals", async () => {
+    const proposalStarted = Promise.withResolvers<void>();
+    const delayedRefusal = Promise.withResolvers<Response>();
+    const refuse = () => Response.json(unknownRoute, { status: 404 });
+    let readsAvailable = true;
+    let firstProposal = true;
+    const client = await connect({
+      gatewayUrl: "https://tenant.example/gw", token,
+      fetchImpl: async (_url, init) => {
+        if (init?.method === "GET") return readsAvailable ? Response.json({ skills: [] }) : refuse();
+        if (!firstProposal) return refuse();
+        firstProposal = false;
+        proposalStarted.resolve();
+        return delayedRefusal.promise;
+      },
+    });
+    const changes: string[] = [];
+    client.setNotificationHandler(ToolListChangedNotificationSchema, ({ method }) => { changes.push(method); });
+    expect(await toolNames(client)).toEqual(allTools);
+    const pending = client.callTool({ name: "skill_propose", arguments: proposal });
+    let result;
+    try {
+      await proposalStarted.promise;
+      readsAvailable = false;
+      expect(await client.callTool({ name: "skill_list" })).toEqual(skillsUnavailable);
+      expect(changes).toEqual(["notifications/tools/list_changed"]);
+      readsAvailable = true;
+      expect(await toolNames(client)).toEqual(allTools);
+    } finally {
+      delayedRefusal.resolve(refuse());
+      result = await pending;
+    }
+    expect(result).toEqual(proposalsUnavailable);
+    expect(changes).toHaveLength(1);
+
+    expect(await client.callTool({ name: "skill_revise", arguments: revision })).toEqual(proposalsUnavailable);
+    expect(changes).toHaveLength(2);
+  });
+
   it("matches every query word across the skill name and description", async () => {
     const client = await connect(await gateway());
     for (const query of ["release notes", "-- DEPLOYS_Notes\trelease -_", "- _ -"]) {
