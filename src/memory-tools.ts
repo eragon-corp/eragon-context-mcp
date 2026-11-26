@@ -34,7 +34,7 @@ export const MEMORY_TOOLS: Tool[] = [
         content: { type: "string", description: "Self-contained durable information to remember." },
         idempotency_key: {
           type: "string",
-          description: "Optional stable key reused when retrying the same logical save.",
+          description: "Optional key for a logical save. Reuse it for retries of that save. Use a new explicit key for a separate save with identical content.",
         },
         memory_id: {
           type: "string",
@@ -219,7 +219,7 @@ async function runMemoryTool(
       body,
       ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
     });
-    if (response.status >= 400) {
+    if (response.status < 200 || response.status >= 300) {
       return errorResult(gatewayErrorMessage(response.body, response.status));
     }
     if (name === "memory_share") return shareResult(response.body, config.gatewayUrl);

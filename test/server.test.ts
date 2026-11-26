@@ -102,6 +102,16 @@ describe("memory MCP server", () => {
     expect(save?.description).toContain("Private matters of anyone other than the user");
   });
 
+  it("tells agents to use a new explicit key for a separate save with identical content", async () => {
+    const client = await connected();
+    const { tools } = await client.listTools();
+    const saveTool = tools.find(({ name }) => name === "memory_save");
+
+    expect(saveTool?.inputSchema.properties?.idempotency_key).toMatchObject({
+      description: expect.stringContaining("Use a new explicit key for a separate save with identical content"),
+    });
+  });
+
   it("forbids saving transcripts on both instruction surfaces", async () => {
     const client = await connected();
     const { tools } = await client.listTools();
@@ -129,7 +139,9 @@ describe("memory MCP server", () => {
       }
       return { body: { diagnostic: authorization } };
     });
-    const client = await connected({ gatewayUrl: gateway.url, token });
+    const config = resolveConfig(["--url", gateway.url], { ERAGON_API_KEY: ` ${token}\r\n` });
+    if (!config.ok) throw new Error(config.error);
+    const client = await connected(config);
     const [read, deniedRead, deniedShare, deniedCorrection] = await Promise.all([
       client.callTool(search("fixture")),
       client.callTool(search("permission")),
@@ -184,10 +196,10 @@ describe("memory MCP server", () => {
     expect(retry).toBe(first);
   });
 
-  it("keeps concurrent calls bound to their launch Gateway and never follows a Gateway redirect", async () => {
+  it("reports a redirected save as an error and keeps concurrent calls on their launch Gateways", async () => {
     const second = await fakeGateway(() => ({ body: { memories: [] } }));
-    const first = await fakeGateway(({ body }) => body.query === "move"
-      ? { status: 307, location: second.url + "/v1/memory/search" }
+    const first = await fakeGateway(({ path }) => path === "/gw/v1/memory"
+      ? { status: 307, location: second.url + "/v1/memory" }
       : { body: { memories: [] } });
     const oldConfig = resolveConfig([], { ANTHROPIC_BASE_URL: first.url, ANTHROPIC_AUTH_TOKEN: "old-session-key" });
     const newConfig = resolveConfig(["--url", second.url], { ERAGON_API_KEY: "new-session-key" });
@@ -195,12 +207,17 @@ describe("memory MCP server", () => {
     const oldSession = await connected(oldConfig);
     const newSession = await connected(newConfig);
 
-    const results = await Promise.all([
-      oldSession.callTool(search("move")),
+    const [redirectedSave, oldSearch, newSearch] = await Promise.all([
+      oldSession.callTool(save),
       oldSession.callTool(search("still on first")),
       newSession.callTool(search("new Gateway")),
     ]);
-    for (const result of results.slice(1)) expect(result.isError).not.toBe(true);
+    expect(redirectedSave).toMatchObject({
+      isError: true,
+      content: [{ text: "Eragon Memory request failed (307)" }],
+    });
+    expect(oldSearch.isError).not.toBe(true);
+    expect(newSearch.isError).not.toBe(true);
     expect(first.calls.map(({ authorization }) => authorization)).toEqual(["Bearer old-session-key", "Bearer old-session-key"]);
     expect(second.calls.map(({ authorization }) => authorization)).toEqual(["Bearer new-session-key"]);
   });

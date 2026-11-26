@@ -160,19 +160,16 @@ The URL is resolved in this order:
 2. `ERAGON_GATEWAY_URL`
 3. `ANTHROPIC_BASE_URL`
 
-The key is resolved in this order:
+The bridge uses `ERAGON_API_KEY` first. It can inherit Claude Code's
+`ANTHROPIC_API_KEY`, or else `ANTHROPIC_AUTH_TOKEN`, only when
+`ANTHROPIC_BASE_URL` points to the selected Memory Gateway. Set
+`ERAGON_API_KEY` for Memory when Claude Code connects directly to Anthropic.
 
-1. `ERAGON_API_KEY`
-2. `ANTHROPIC_API_KEY`
-3. `ANTHROPIC_AUTH_TOKEN`
-
-When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
-`ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,
-or else `ANTHROPIC_AUTH_TOKEN`). A stale `ERAGON_API_KEY` would otherwise save
-Memory under another key than the model calls use. A Claude Code key paired
-with `ANTHROPIC_BASE_URL` requires that same Gateway URL. The bridge
-checks that the key is a single printable token before starting and redacts
-the configured key in tool results.
+When Claude Code has a Gateway URL and a key, a configured
+`ERAGON_API_KEY` must match the model key. The bridge trims surrounding
+whitespace before comparing keys, checks that the selected key is a single
+printable token, and uses that same token for requests and redaction.
+Gateway redirects are reported as tool errors.
 
 ## Development
 
