@@ -3,6 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { callMemoryTool, MEMORY_TOOLS } from "./memory-tools.js";
+import { createSkillSession, SKILL_TOOL_NAMES } from "./skill-tools.js";
 import { VERSION } from "./version.js";
 export function fallbackIdempotencyKey(sessionId, requestId) {
     return `mcp:${sessionId}:${String(requestId)}`;
@@ -22,9 +23,19 @@ export const MEMORY_INSTRUCTIONS = [
 ].join("\n");
 export function createMemoryMcpServer(config) {
     const sessionId = randomUUID();
-    const server = new Server({ name: "eragon-context", version: VERSION }, { capabilities: { tools: {} }, instructions: MEMORY_INSTRUCTIONS });
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MEMORY_TOOLS }));
-    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => callMemoryTool(request.params.name, request.params.arguments ?? {}, config, fallbackIdempotencyKey(sessionId, extra.requestId)));
+    const server = new Server({ name: "eragon-context", version: VERSION }, { capabilities: { tools: { listChanged: true } }, instructions: MEMORY_INSTRUCTIONS });
+    const skills = createSkillSession(() => { server.sendToolListChanged().catch(() => undefined); });
+    server.onclose = () => skills.close();
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+        return { tools: [...MEMORY_TOOLS, ...await skills.list(config)] };
+    });
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+        const { name, arguments: args = {} } = request.params;
+        if (SKILL_TOOL_NAMES.has(name)) {
+            return skills.call(name, args, config);
+        }
+        return callMemoryTool(name, args, config, fallbackIdempotencyKey(sessionId, extra.requestId));
+    });
     return server;
 }
 export async function runMemoryMcp(config) {

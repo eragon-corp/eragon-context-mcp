@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 import { createMemoryMcpServer } from "../src/server.js";
 
 async function connected() {
-  const server = createMemoryMcpServer({ gatewayUrl: "https://s.eragon.ai/gw", token: "test-secret" });
+  const server = createMemoryMcpServer({
+    gatewayUrl: "https://s.eragon.ai/gw",
+    token: "test-secret",
+    fetchImpl: async () => new Response(null, { status: 404 }),
+  });
   const client = new Client({ name: "test", version: "0.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

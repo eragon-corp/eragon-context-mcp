@@ -3,7 +3,7 @@
 Connect coding agents to the key owner's Eragon Memory through a narrow local
 MCP bridge.
 
-The bridge exposes exactly three tools:
+The bridge exposes three Memory tools:
 
 - `memory_search` searches permission-filtered General Memory.
 - `memory_save` writes durable facts, preferences, procedures, or contacts to
@@ -31,6 +31,60 @@ present in the coding agent's environment.
 - **Allow Memory write-back** enabled for `memory_save` and `memory_share`
 
 Use an HTTPS Gateway URL outside isolated local testing.
+
+## Skills
+
+Each MCP tool listing checks `GET /gw/v1/skills` with the same Gateway key.
+A successful response, including an empty list, enables Skills. The Gateway's
+unknown-path response hides them. A temporary failure keeps the last known
+availability and triggers a background retry with backoff and any
+`Retry-After` delay. The bridge notifies clients when the tool list changes.
+The first listing can also retry once within its five-second budget.
+
+A key with Skills access needs Memory write-back (`memory:write`) to propose
+changes. If the Gateway returns an unknown-path response for a proposal, the
+bridge hides both proposal tools from the current listing and keeps skill reads
+available. The next tool listing offers both proposal tools again whenever skill
+reads are available. A direct proposal call can also retry in the same session.
+After a Skills read refusal, only proposal calls started after that refusal can
+hide the proposal tools.
+
+| Tool | Arguments and result |
+|---|---|
+| `skill_list` | Check before redoing a known procedure. Optional `query` requires every word to appear somewhere in the name or description, ignoring case. Hyphens, underscores, and whitespace separate query words. `truncated: true` means the Gateway returned the first 500 skills by name, even if the filter finds none. |
+| `skill_get` | Pass `idOrName` for the published version, `SKILL.md` as `body`, and a list of companion files. Add a bundle-relative `path` to read a text file up to 256 KiB. |
+| `skill_propose` | Propose a reusable procedure with a kebab-case `name`, `description`, `body`, `reason`, and optional `files` with `path` and `content`. |
+| `skill_revise` | Propose a body-only improvement. Pass `skillId` and `baseVersion` from `skill_get`, the new `body`, and a `reason`. Companion files carry over. |
+
+Proposals wait on **Skills → Installed**. The key owner can **Publish** a new
+skill or review the diff and **Accept revision** to apply a draft. The receipt
+returns the skill ID as both `proposalId` and `skillId`, the `kind`
+(`skill` or `revision`), and a clickable `reviewUrl`. The bridge uses its
+Gateway origin when the server returns the relative `/skills/installed` path.
+Revision receipts also return `baseVersion`.
+
+New skill names use lowercase letters and digits separated by single hyphens,
+up to 100 characters. A description contains 1–500 characters. A proposal
+body is limited to 64 KiB, its reason to 1–2000 characters, and a new skill's
+files to 50 files totaling 1 MiB. Send SKILL.md as the body and give every
+companion file a unique path of at most 500 characters. The whole JSON
+request is limited to 2 MiB. Eragon adds name and description frontmatter when
+the body arrives without it, and the resulting body must still fit 64 KiB.
+
+The bridge submits a revision directly. Eragon restores the skill's existing
+name if the submitted frontmatter declares a different one. For a body
+without frontmatter, Eragon adds it using the skill's existing name and
+description.
+
+The bridge retries a new skill proposal once if the connection fails before
+any response, using the identical request. Eragon returns the earlier
+proposal only when the name, SKILL.md, and companion file paths and contents
+match. If the name is taken, check **Skills → Installed** for an earlier
+proposal before submitting under another name.
+
+If the published version changes, call `skill_get` again, reconcile the
+changes, and retry `skill_revise` once. If another change is being applied,
+wait for it to land before re-reading the skill.
 
 ## Install from GitHub
 
