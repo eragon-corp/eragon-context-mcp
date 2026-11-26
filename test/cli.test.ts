@@ -100,6 +100,20 @@ describe("loadConfig: the key from a command when the environment has none", () 
     dir = undefined;
   });
 
+  it("refuses a terminal bearer on another Gateway's Desktop registration", async () => {
+    const resolved = await loadConfig(["--url", GW, "--key-command", node("process.exit(9)")], {
+      ...PATH_ONLY,
+      ANTHROPIC_BASE_URL: "https://other.example/gw",
+      ANTHROPIC_AUTH_TOKEN: "esk_other_gateway",
+    });
+    expect(resolved).toMatchObject({ ok: false, error: expect.stringContaining("ANTHROPIC_BASE_URL") });
+  });
+
+  it("rejects a helper key containing a control byte before MCP startup", async () => {
+    const resolved = await loadConfig(["--url", GW, "--key-command", node("process.stdout.write('esk_bad' + String.fromCharCode(0) + 'key')")], PATH_ONLY);
+    expect(resolved).toEqual({ ok: false, error: "The key command did not print one key." });
+  });
+
   it("still refuses without a key or a key command", async () => {
     const resolved = await loadConfig(["--url", GW], PATH_ONLY);
     expect(resolved.ok).toBe(false);

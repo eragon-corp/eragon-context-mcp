@@ -93,6 +93,19 @@ export function resolveConfig(
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return { ok: false, error: "The Eragon Gateway URL must use HTTPS or HTTP." };
   }
+  const credentialUrl = environment.ERAGON_API_KEY === undefined
+    ? environment.ANTHROPIC_BASE_URL
+    : undefined;
+  if (modelKey !== undefined && credentialUrl !== undefined) {
+    const normalize = (url: URL) => url.href.replace(/\/+$/, "");
+    try {
+      if (normalize(parsed) !== normalize(new URL(credentialUrl))) {
+        return { ok: false, error: "The Memory Gateway does not match ANTHROPIC_BASE_URL for the model key." };
+      }
+    } catch {
+      return { ok: false, error: "ANTHROPIC_BASE_URL for the model key is invalid." };
+    }
+  }
   // Last, so a URL problem is reported before loadConfig runs a key command.
   if (token === undefined || token.trim() === "") return { ok: false, error: NO_KEY };
   return { ok: true, gatewayUrl: gatewayUrl.replace(/\/+$/, ""), token };
@@ -174,7 +187,7 @@ function keyFromCommand(
         return;
       }
       const key = printed.trim();
-      if (overflow || key === "" || /\s/.test(key)) {
+      if (overflow || !/^[\x21-\x7e]+$/.test(key)) {
         finish({ ok: false, error: "The key command did not print one key." });
         return;
       }
