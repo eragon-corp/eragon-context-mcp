@@ -1,4 +1,10 @@
 import { VERSION } from "./version.js";
+function retryAfterSeconds(header) {
+    if (!header)
+        return undefined;
+    const seconds = /^\d+$/.test(header) ? Number(header) : (Date.parse(header) - Date.now()) / 1000;
+    return Number.isFinite(seconds) ? Math.max(0, seconds) : undefined;
+}
 export async function requestGateway({ gatewayUrl, token, path, method = "POST", body, fetchImpl = fetch, timeoutMs, responseType, retryOnNetworkError = false, }) {
     if (timeoutMs !== undefined && timeoutMs <= 0)
         throw new Error("Eragon request timed out.");
@@ -28,15 +34,17 @@ export async function requestGateway({ gatewayUrl, token, path, method = "POST",
         response = await fetchImpl(url, init);
     }
     const text = await response.text();
+    const retryAfter = retryAfterSeconds(response.headers?.get("retry-after"));
+    const result = { status: response.status, ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }) };
     if (responseType === "text" && response.status === 200)
-        return { status: response.status, body: text };
+        return { ...result, body: text };
     if (text === "")
-        return { status: response.status, body: null };
+        return { ...result, body: null };
     try {
-        return { status: response.status, body: JSON.parse(text) };
+        return { ...result, body: JSON.parse(text) };
     }
     catch {
-        return { status: response.status, body: text };
+        return { ...result, body: text };
     }
 }
 //# sourceMappingURL=client.js.map

@@ -3,7 +3,14 @@ import { VERSION } from "./version.js";
 export type GatewayResponse = {
   status: number;
   body: unknown;
+  retryAfterSeconds?: number;
 };
+
+function retryAfterSeconds(header: string | null | undefined): number | undefined {
+  if (!header) return undefined;
+  const seconds = /^\d+$/.test(header) ? Number(header) : (Date.parse(header) - Date.now()) / 1000;
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : undefined;
+}
 
 export type GatewayRequest = {
   gatewayUrl: string;
@@ -54,11 +61,13 @@ export async function requestGateway({
     response = await fetchImpl(url, init);
   }
   const text = await response.text();
-  if (responseType === "text" && response.status === 200) return { status: response.status, body: text };
-  if (text === "") return { status: response.status, body: null };
+  const retryAfter = retryAfterSeconds(response.headers?.get("retry-after"));
+  const result = { status: response.status, ...(retryAfter === undefined ? {} : { retryAfterSeconds: retryAfter }) };
+  if (responseType === "text" && response.status === 200) return { ...result, body: text };
+  if (text === "") return { ...result, body: null };
   try {
-    return { status: response.status, body: JSON.parse(text) as unknown };
+    return { ...result, body: JSON.parse(text) as unknown };
   } catch {
-    return { status: response.status, body: text };
+    return { ...result, body: text };
   }
 }

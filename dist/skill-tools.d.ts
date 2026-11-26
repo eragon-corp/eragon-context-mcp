@@ -8,10 +8,18 @@ type SkillConfig = {
     token: string;
     fetchImpl?: typeof fetch;
 };
-export declare function probeSkills(config: SkillConfig, timeoutMs?: number): Promise<"available" | "absent" | "unknown">;
+type ProbeOutcome = {
+    kind: "available" | "absent";
+} | {
+    kind: "unknown";
+    retry: boolean;
+    retryAfterSeconds?: number;
+};
+export declare function probeSkills(config: SkillConfig, timeoutMs?: number): Promise<ProbeOutcome>;
 export declare function createSkillSession(onToolsChanged: () => void): {
     list(config: SkillConfig, timeoutMs?: number): Promise<Tool[]>;
     call(name: string, args: Record<string, unknown>, config: SkillConfig, deadline?: number): Promise<CallToolResult>;
+    close(): void;
 };
 export {};
 //# sourceMappingURL=skill-tools.d.ts.map

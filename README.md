@@ -35,10 +35,16 @@ Use an HTTPS Gateway URL outside isolated local testing.
 ## Skills
 
 Each MCP tool listing checks `GET /gw/v1/skills` with the same Gateway key.
-A successful response, including an empty list, enables Skills. A key with
-Skills access needs Memory write-back (`memory:write`) to propose changes.
-If the Gateway hides the proposal route, the bridge skips the call and hides
-both proposal tools for the session while skill reads remain available.
+A successful response, including an empty list, enables Skills. The Gateway's
+unknown-path response hides them. A temporary failure keeps the last known
+availability and triggers a background retry with backoff and any
+`Retry-After` delay. The bridge notifies clients when the tool list changes.
+The first listing can also retry once within its five-second budget.
+
+A key with Skills access needs Memory write-back (`memory:write`) to propose
+changes. If the Gateway hides the proposal route, the bridge skips the call
+and hides both proposal tools while skill reads remain available. Start a
+fresh bridge session after adding the write grant.
 
 | Tool | Arguments and result |
 |---|---|
@@ -50,14 +56,17 @@ both proposal tools for the session while skill reads remain available.
 Proposals wait on **Skills → Installed**. The key owner can **Publish** a new
 skill or review the diff and **Accept revision** to apply a draft. The receipt
 returns the skill ID as both `proposalId` and `skillId`, the `kind`
-(`skill` or `revision`), and the `reviewUrl` (which may be `/skills/installed`).
+(`skill` or `revision`), and a clickable `reviewUrl`. The bridge uses its
+Gateway origin when the server returns the relative `/skills/installed` path.
 Revision receipts also return `baseVersion`.
 
 New skill names use lowercase letters and digits separated by single hyphens,
-up to 100 characters. The description limit is 500 characters. A proposal
+up to 100 characters. A description contains 1–500 characters. A proposal
 body is limited to 64 KiB, its reason to 1–2000 characters, and a new skill's
-files to 50 files totaling 1 MiB. The whole JSON request is limited to 2 MiB.
-Eragon adds name and description frontmatter when the body arrives without it.
+files to 50 files totaling 1 MiB. Send SKILL.md as the body and give every
+companion file a unique path of at most 500 characters. The whole JSON
+request is limited to 2 MiB. Eragon adds name and description frontmatter when
+the body arrives without it, and the resulting body must still fit 64 KiB.
 
 The bridge retries a new skill proposal once if the connection fails before
 any response, using the identical request. If the published version changes

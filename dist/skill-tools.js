@@ -2,6 +2,8 @@ import { requestGateway } from "./client.js";
 const SKILLS_PATH = "/v1/skills";
 export const SKILL_PROBE_TIMEOUT_MS = 5_000;
 export const SKILL_CALL_TIMEOUT_MS = 45_000;
+const PROBE_BACKOFF_MS = [2_000, 10_000, 60_000];
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const READ_UNAVAILABLE = "Eragon Skills are unavailable on this server or for this key.";
 const WRITE_UNAVAILABLE = "Eragon skill proposals are unavailable on this server or for this key.";
 const NAME_PATTERN = "^[a-z0-9]+(?:-[a-z0-9]+)*$";
@@ -58,7 +60,7 @@ export const SKILL_TOOLS = [
             type: "object",
             properties: {
                 name: { type: "string", pattern: NAME_PATTERN, maxLength: NAME_MAX, description: "Kebab-case, such as release-notes." },
-                description: { type: "string", maxLength: DESCRIPTION_MAX },
+                description: { type: "string", minLength: 1, maxLength: DESCRIPTION_MAX },
                 ...draftFields,
                 files: fileSchema,
             },
@@ -71,7 +73,7 @@ export const SKILL_TOOLS = [
         description: "Propose a body revision to a skill you improved, using its ID and version from skill_get. Tell the user to review the diff and accept it on Skills → Installed at the returned reviewUrl.",
         inputSchema: {
             type: "object",
-            properties: { skillId: { type: "string" }, baseVersion: { type: "integer", minimum: 0 }, ...draftFields },
+            properties: { skillId: { type: "string" }, baseVersion: { type: "integer", minimum: 1 }, ...draftFields },
             required: ["skillId", "baseVersion", "body", "reason"],
             additionalProperties: false,
         },
@@ -83,8 +85,8 @@ const READ_TOOLS = SKILL_TOOLS.filter(({ name }) => !isWriter(name));
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
 const validSegment = (part) => part !== "" && part !== "." && part !== "..";
-const isFilePath = (value) => nonEmpty(value) && !value.includes("\\") && value.split("/").every(validSegment);
-const isProposalFile = (file) => isRecord(file) && isFilePath(file.path) && typeof file.content === "string";
+const isFilePath = (value) => nonEmpty(value) && !value.includes("\\") && !value.includes("\0") && value.split("/").every(validSegment);
+const isProposalFile = (file) => isRecord(file) && isFilePath(file.path) && file.path.length <= 500 && typeof file.content === "string";
 const textResult = (text) => ({ content: [{ type: "text", text }] });
 function errorResult(message) {
     return { ...textResult(message.replace(/\s+/g, " ").trim()), isError: true };
@@ -99,11 +101,13 @@ function skillList(body) {
     return { skills, ...(body.truncated === true ? { truncated: true } : {}) };
 }
 function isUnknownRoute({ status, body }) {
-    return status === 404 && isRecord(body) && isRecord(body.error) && body.error.type === "not_found_error";
+    return status === 404 && isRecord(body) && isRecord(body.error) &&
+        body.error.type === "not_found_error" && body.error.message === "unknown gateway path";
 }
+const retryProbe = { kind: "unknown", retry: true };
 export async function probeSkills(config, timeoutMs = SKILL_PROBE_TIMEOUT_MS) {
     if (timeoutMs <= 0)
-        return "unknown";
+        return retryProbe;
     let timer;
     try {
         // A Flux launcher may re-read its key before passing the abort signal on to fetch.
@@ -111,61 +115,140 @@ export async function probeSkills(config, timeoutMs = SKILL_PROBE_TIMEOUT_MS) {
             requestGateway({ ...config, path: SKILLS_PATH, method: "GET", timeoutMs }),
             new Promise((resolve) => { timer = setTimeout(() => resolve(undefined), timeoutMs); }),
         ]);
-        if (response?.status === 200 && skillList(response.body) !== undefined)
-            return "available";
-        return response !== undefined && isUnknownRoute(response) ? "absent" : "unknown";
+        if (response === undefined)
+            return retryProbe;
+        if (response.status === 200 && skillList(response.body) !== undefined)
+            return { kind: "available" };
+        if (isUnknownRoute(response))
+            return { kind: "absent" };
+        if (response.status === 429 || response.status >= 500) {
+            return {
+                ...retryProbe,
+                ...(response.retryAfterSeconds === undefined ? {} : { retryAfterSeconds: response.retryAfterSeconds }),
+            };
+        }
+        return { kind: "unknown", retry: false };
     }
     catch {
-        return "unknown";
+        return retryProbe;
     }
     finally {
         clearTimeout(timer);
     }
 }
 export function createSkillSession(onToolsChanged) {
-    let readsUnavailable = false;
+    let readState = "unknown";
     let writesUnavailable = false;
-    let advertised = [];
+    const noTools = [];
+    let advertised;
     let readRefusals = 0;
+    let inFlight;
+    let retryTimer;
+    let retryStep = 0;
+    let retryNotBefore = 0;
+    let closed = false;
+    const visibleTools = () => readState === "available" ? (writesUnavailable ? READ_TOOLS : SKILL_TOOLS) : noTools;
+    const notify = () => {
+        const visible = visibleTools();
+        if (closed || advertised === undefined || advertised === visible)
+            return;
+        advertised = visible;
+        onToolsChanged();
+    };
+    const resetRetry = () => {
+        clearTimeout(retryTimer);
+        retryStep = 0;
+        retryNotBefore = 0;
+    };
+    const markAbsent = () => {
+        readState = "absent";
+        writesUnavailable = false;
+        readRefusals += 1;
+        resetRetry();
+    };
+    function scheduleRetry(config, retryAfterSeconds = 0) {
+        clearTimeout(retryTimer);
+        const now = Date.now();
+        retryNotBefore = now + retryAfterSeconds * 1_000;
+        const retryAt = Math.max(retryNotBefore, now + (PROBE_BACKOFF_MS[retryStep] ?? PROBE_BACKOFF_MS[2]));
+        retryStep = Math.min(retryStep + 1, PROBE_BACKOFF_MS.length - 1);
+        const wake = () => {
+            const remaining = retryAt - Date.now();
+            if (remaining > 0) {
+                retryTimer = setTimeout(wake, Math.min(remaining, MAX_TIMER_MS));
+                retryTimer.unref();
+            }
+            else if (!closed) {
+                void refresh(config, SKILL_PROBE_TIMEOUT_MS).then(notify);
+            }
+        };
+        wake();
+    }
+    function refresh(config, timeoutMs, firstList = false) {
+        if (inFlight !== undefined)
+            return inFlight;
+        const refusalsAtStart = readRefusals;
+        const deadline = Date.now() + timeoutMs;
+        inFlight = (async () => {
+            let outcome = await probeSkills(config, timeoutMs);
+            if (closed || refusalsAtStart !== readRefusals)
+                return;
+            // Give clients that only list at startup one more chance within the original deadline.
+            if (firstList && outcome.kind === "unknown" && outcome.retry) {
+                const delay = (outcome.retryAfterSeconds ?? 0) * 1_000;
+                if (delay < deadline - Date.now()) {
+                    if (delay > 0)
+                        await new Promise((resolve) => { setTimeout(() => resolve(), delay).unref(); });
+                    if (closed || refusalsAtStart !== readRefusals)
+                        return;
+                    outcome = await probeSkills(config, deadline - Date.now());
+                    if (closed || refusalsAtStart !== readRefusals)
+                        return;
+                }
+            }
+            switch (outcome.kind) {
+                case "available":
+                    readState = "available";
+                    resetRetry();
+                    break;
+                case "absent":
+                    markAbsent();
+                    break;
+                case "unknown":
+                    if (outcome.retry)
+                        scheduleRetry(config, outcome.retryAfterSeconds);
+                    else
+                        resetRetry();
+                    break;
+            }
+        })().finally(() => { inFlight = undefined; });
+        return inFlight;
+    }
     const unavailable = (route) => {
-        const previouslyAdvertised = advertised;
-        if (route === "read") {
-            readsUnavailable = true;
-            writesUnavailable = false;
-            readRefusals += 1;
-            advertised = [];
-        }
-        else if (!readsUnavailable) {
+        if (route === "read")
+            markAbsent();
+        else if (readState !== "absent")
             writesUnavailable = true;
-            if (advertised === SKILL_TOOLS)
-                advertised = READ_TOOLS;
-        }
-        if (previouslyAdvertised.length !== advertised.length)
-            onToolsChanged();
+        notify();
         return textResult(route === "read" ? READ_UNAVAILABLE : WRITE_UNAVAILABLE);
     };
     return {
-        async list(config, timeoutMs) {
-            const refusalsAtStart = readRefusals;
-            const outcome = await probeSkills(config, timeoutMs);
-            if (outcome === "absent") {
-                readsUnavailable = true;
-                writesUnavailable = false;
-                readRefusals += 1;
-            }
-            else if (outcome === "available" && refusalsAtStart === readRefusals) {
-                // An older successful probe must not undo an intervening read refusal.
-                readsUnavailable = false;
-            }
-            advertised = outcome === "available" && !readsUnavailable ? (writesUnavailable ? READ_TOOLS : SKILL_TOOLS) : [];
+        async list(config, timeoutMs = SKILL_PROBE_TIMEOUT_MS) {
+            if (Date.now() >= retryNotBefore)
+                await refresh(config, timeoutMs, advertised === undefined);
+            advertised = visibleTools();
             return advertised;
         },
         async call(name, args, config, deadline) {
-            if (readsUnavailable)
+            if (readState === "absent")
                 return textResult(READ_UNAVAILABLE);
             if (writesUnavailable && isWriter(name))
                 return textResult(WRITE_UNAVAILABLE);
             return callSkillTool(name, args, config, unavailable, deadline);
+        },
+        close() {
+            closed = true;
+            resetRetry();
         },
     };
 }
@@ -183,7 +266,7 @@ function gatewayError(response, route, onUnavailable) {
             message = `The skill version changed.${version} Call skill_get again, reconcile your changes, and retry skill_revise once.`;
             break;
         case "skill_name_taken":
-            message = "A published skill already uses that name. Use skill_get to see it or choose another name.";
+            message = "A skill already uses that name. Use skill_get for a published skill or choose another name.";
             break;
         case "skill_name_proposed":
             message = "A proposal for that skill name is already waiting for review on Skills → Installed.";
@@ -220,7 +303,8 @@ function gatewayError(response, route, onUnavailable) {
         default:
             message = `Eragon Skills request failed (HTTP ${response.status}).`;
     }
-    return errorResult(nonEmpty(body.message) ? `${message} ${body.message}` : message);
+    const detail = nonEmpty(body.message) ? body.message : isRecord(body.error) ? body.error.message : undefined;
+    return errorResult(nonEmpty(detail) ? `${message} ${detail}` : message);
 }
 function validSkillId(value) {
     return nonEmpty(value) && validSegment(value.trim()) && !value.includes("/") && !value.includes("\\");
@@ -288,13 +372,17 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
             if (typeof skillName !== "string" || skillName.length > NAME_MAX || !NAME_REGEX.test(skillName)) {
                 return errorResult(`The skill name must be kebab-case with at most ${NAME_MAX} characters, such as release-notes.`);
             }
-            if (typeof description !== "string" || description.length > DESCRIPTION_MAX) {
-                return errorResult(`The skill description must be a string of at most ${DESCRIPTION_MAX} characters.`);
+            if (!nonEmpty(description) || description.trim().length > DESCRIPTION_MAX) {
+                return errorResult(`The skill description must contain 1 to ${DESCRIPTION_MAX} characters.`);
             }
             proposal = { name: skillName, description, body, reason };
             if (files !== undefined) {
                 if (!Array.isArray(files) || files.length > FILES_MAX || !files.every(isProposalFile)) {
                     return errorResult(`Provide at most ${FILES_MAX} files with bundle-relative paths and text content.`);
+                }
+                const paths = new Set(files.map(({ path }) => path));
+                if (paths.has("SKILL.md") || paths.size !== files.length) {
+                    return errorResult("Use unique companion file paths and send SKILL.md as body.");
                 }
                 if (files.reduce((bytes, file) => bytes + Buffer.byteLength(file.content), 0) > FILES_MAX_BYTES) {
                     return errorResult("The proposed files must total at most 1 MiB of UTF-8 text.");
@@ -306,7 +394,7 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
             if (files !== undefined)
                 return errorResult("skill_revise accepts only SKILL.md changes. Remove files and submit the updated body.");
             const { skillId, baseVersion } = args;
-            if (!validSkillId(skillId) || typeof baseVersion !== "number" || !Number.isSafeInteger(baseVersion) || baseVersion < 0) {
+            if (!validSkillId(skillId) || typeof baseVersion !== "number" || !Number.isSafeInteger(baseVersion) || baseVersion < 1) {
                 return errorResult("skill_revise requires a skillId and an integer baseVersion from skill_get.");
             }
             const id = skillId.trim();
@@ -340,7 +428,9 @@ async function callSkillTool(name, args, config, onUnavailable, deadline = Date.
             (kind === "revision" && (receipt.skillId !== proposal.baseSkillId || receipt.baseVersion !== proposal.baseVersion))) {
             return errorResult("Eragon did not return a valid proposal receipt. Check Skills → Installed before submitting again.");
         }
-        return textResult(JSON.stringify(receipt, null, 2));
+        const reviewUrl = receipt.reviewUrl === "/skills/installed"
+            ? new URL(receipt.reviewUrl, config.gatewayUrl).href : receipt.reviewUrl;
+        return textResult(JSON.stringify({ ...receipt, reviewUrl }, null, 2));
     }
     catch {
         return errorResult(submitting

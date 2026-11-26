@@ -1,6 +1,7 @@
 export type GatewayResponse = {
     status: number;
     body: unknown;
+    retryAfterSeconds?: number;
 };
 export type GatewayRequest = {
     gatewayUrl: string;

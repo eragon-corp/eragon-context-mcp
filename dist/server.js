@@ -25,6 +25,7 @@ export function createMemoryMcpServer(config) {
     const sessionId = randomUUID();
     const server = new Server({ name: "eragon-context", version: VERSION }, { capabilities: { tools: { listChanged: true } }, instructions: MEMORY_INSTRUCTIONS });
     const skills = createSkillSession(() => { server.sendToolListChanged().catch(() => undefined); });
+    server.onclose = () => skills.close();
     server.setRequestHandler(ListToolsRequestSchema, async () => {
         return { tools: [...MEMORY_TOOLS, ...await skills.list(config)] };
     });
