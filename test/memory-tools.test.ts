@@ -2,6 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { callMemoryTool } from "../src/memory-tools.js";
 
+it("redacts the bearer from Gateway and transport errors", async () => {
+  const token = "esk_synthetic_diagnostic";
+  const message = `Request failed for Bearer ${token}`;
+  const fetchImpl = vi.fn<typeof fetch>()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message } }), { status: 400 }))
+    .mockRejectedValueOnce(new Error(message));
+  const config = { gatewayUrl: "https://s.eragon.ai/gw", token, fetchImpl };
+  const results = await Promise.all([1, 2].map(() => callMemoryTool("memory_search", { query: "test" }, config)));
+  expect(results.map((result) => result.isError)).toEqual([true, true]);
+  expect(JSON.stringify(results)).not.toContain(token);
+});
+
 describe("memory_search", () => {
   it("searches the key owner's General Memory through the Gateway", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(

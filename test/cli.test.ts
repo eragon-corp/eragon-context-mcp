@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { resolveConfig } from "../src/cli.js";
+import { loadConfig, resolveConfig } from "../src/cli.js";
 
 describe("resolveConfig", () => {
   it("uses Claude Code's existing Gateway environment without storing another secret", () => {
@@ -81,4 +88,267 @@ describe("resolveConfig", () => {
       }),
     ).toEqual({ ok: true, gatewayUrl: "https://s.eragon.ai/gw", token: "memory-key" });
   });
+});
+
+/** A shell command that runs `code` in this Node, for a key command that works on every CI runner. */
+const node = (code: string) => `${JSON.stringify(process.execPath)} -e ${JSON.stringify(code)}`;
+const GW = "https://acme.s.eragon.ai/gw";
+const PATH_ONLY = { PATH: process.env.PATH };
+
+describe("loadConfig: the key from a command when the environment has none", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it("refuses a terminal bearer on another Gateway's Desktop registration", async () => {
+    const resolved = await loadConfig(["--url", GW, "--key-command", node("process.exit(9)")], {
+      ...PATH_ONLY,
+      ANTHROPIC_BASE_URL: "https://other.example/gw",
+      ANTHROPIC_AUTH_TOKEN: "esk_other_gateway",
+    });
+    expect(resolved).toMatchObject({ ok: false, error: expect.stringContaining("ANTHROPIC_BASE_URL") });
+  });
+
+  it("rejects a helper key containing a control byte before MCP startup", async () => {
+    const resolved = await loadConfig(["--url", GW, "--key-command", node("process.stdout.write('esk_bad' + String.fromCharCode(0) + 'key')")], PATH_ONLY);
+    expect(resolved).toEqual({ ok: false, error: "The key command did not print one key." });
+  });
+
+  it("still refuses without a key or a key command", async () => {
+    const resolved = await loadConfig(["--url", GW], PATH_ONLY);
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error).toContain("--key-command");
+  });
+
+  it("reads the key a command prints, as Claude Desktop keeps it out of the environment", async () => {
+    const command = node("process.stdout.write('esk_from_command\\n')");
+    expect(await loadConfig(["--url", GW, "--key-command", command], PATH_ONLY)).toEqual({
+      ok: true,
+      gatewayUrl: GW,
+      token: "esk_from_command",
+    });
+  });
+
+  it("takes the command from ERAGON_API_KEY_COMMAND too, and the flag wins over it", async () => {
+    const fromEnv = await loadConfig(["--url", GW], {
+      ...PATH_ONLY,
+      ERAGON_API_KEY_COMMAND: node("process.stdout.write('esk_env_command')"),
+    });
+    expect(fromEnv).toEqual({ ok: true, gatewayUrl: GW, token: "esk_env_command" });
+    const both = await loadConfig(["--url", GW, `--key-command=${node("process.stdout.write('esk_flag')")}`], {
+      ...PATH_ONLY,
+      ERAGON_API_KEY_COMMAND: node("process.exit(9)"),
+    });
+    expect(both).toEqual({ ok: true, gatewayUrl: GW, token: "esk_flag" });
+  });
+
+  it("uses a key already in the environment and never runs the command", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const marker = join(dir, "ran");
+    const command = node(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x'); process.stdout.write('esk_other')`);
+    const resolved = await loadConfig(["--key-command", command], {
+      ...PATH_ONLY,
+      ANTHROPIC_BASE_URL: GW,
+      ANTHROPIC_AUTH_TOKEN: "esk_model",
+    });
+    expect(resolved).toEqual({ ok: true, gatewayUrl: GW, token: "esk_model" });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("reports a URL problem before running any command", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const marker = join(dir, "ran");
+    const command = node(`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x'); process.exit(7)`);
+    const missing = await loadConfig(["--key-command", command], PATH_ONLY);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error).toContain("--url");
+    const invalid = await loadConfig(["--url", "not-a-url", "--key-command", command], PATH_ONLY);
+    expect(invalid).toEqual({ ok: false, error: "The Eragon Gateway URL is invalid." });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("refuses a command that fails, without repeating what it printed", async () => {
+    const resolved = await loadConfig(
+      ["--url", GW, "--key-command", node("process.stdout.write('esk_leaked'); process.exit(3)")],
+      PATH_ONLY,
+    );
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.error).toContain("exit 3");
+      expect(resolved.error).not.toContain("esk_leaked");
+    }
+  });
+
+  it("refuses a command that prints no key, or more than one word, without repeating it", async () => {
+    for (const printed of ["", "esk_one esk_two"]) {
+      const resolved = await loadConfig(
+        ["--url", GW, "--key-command", node(`process.stdout.write(${JSON.stringify(printed)})`)],
+        PATH_ONLY,
+      );
+      expect(resolved.ok).toBe(false);
+      if (!resolved.ok) {
+        expect(resolved.error).toContain("did not print one key");
+        expect(resolved.error).not.toContain("esk_one");
+      }
+    }
+  });
+
+  it("refuses output past its limit rather than keep the first part as the key", async () => {
+    const resolved = await loadConfig(
+      ["--url", GW, "--key-command", node("process.stdout.write('a'.repeat(20000)); process.stdout.write(' esk_second')")],
+      PATH_ONLY,
+    );
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) {
+      expect(resolved.error).toContain("did not print one key");
+      expect(resolved.error).not.toContain("aaaa");
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stops what the command started too, so nothing outlives the deadline", async () => {
+    dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+    const pidFile = join(dir, "pid");
+    // Two commands, so the shell cannot exec the first: it stays as the parent of a waiting child.
+    const command = `${node(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 20000)`)}; echo esk_late`;
+    const resolved = await loadConfig(["--url", GW, "--key-command", command], PATH_ONLY, { keyCommandTimeoutMs: 1000 });
+    expect(resolved.ok).toBe(false);
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("stops a command that does not finish", async () => {
+    const started = Date.now();
+    const resolved = await loadConfig(["--url", GW, "--key-command", node("setTimeout(() => {}, 20000)")], PATH_ONLY, {
+      keyCommandTimeoutMs: 300,
+    });
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.error).toContain("did not finish");
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+describe("the bridge as an MCP client starts it", () => {
+  function launch(args: string[], env = PATH_ONLY) {
+    return spawn(process.execPath, [fileURLToPath(new URL("../bin/eragon-context-mcp.mjs", import.meta.url)), ...args], {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  /** Starts the real command, says hello over stdio, and returns its first answer or its exit and stderr. */
+  function start(args: string[], env?: NodeJS.ProcessEnv): Promise<{ answer?: unknown; code?: number | null; stderr: string }> {
+    const child = launch(args, env);
+    let stderr = "";
+    let stdout = "";
+    child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ stderr });
+      }, 10_000);
+      child.stdout.on("data", (chunk) => {
+        stdout += String(chunk);
+        // A chunk is not a message: parse only a line the bridge has finished.
+        const end = stdout.indexOf("\n");
+        if (end === -1) return;
+        const line = stdout.slice(0, end);
+        clearTimeout(timer);
+        child.kill();
+        resolve({ answer: JSON.parse(line), stderr });
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        resolve({ code, stderr });
+      });
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "desktop-stand-in", version: "0" } },
+        })}\n`,
+      );
+    });
+  }
+
+  it("answers initialize when a key command supplies the key", async () => {
+    const command = node("setTimeout(() => process.stdout.write('esk_from_keychain'), 100)");
+    const started = await start(["--url", GW, "--key-command", command]);
+    expect(started.stderr).not.toContain("Set ERAGON_API_KEY");
+    expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: expect.any(String) } } });
+    expect(JSON.stringify(started.answer)).not.toContain("esk_from_keychain");
+  });
+
+  it("exits with the same refusal as before when there is no key command", async () => {
+    const started = await start(["--url", GW]);
+    expect(started.code).toBe(1);
+    expect(started.stderr).toContain("Set ERAGON_API_KEY");
+  });
+
+  it("answers initialize with ERAGON_API_KEY and no helper", async () => {
+    const started = await start(["--url", GW], { ...PATH_ONLY, ERAGON_API_KEY: "esk_from_environment" });
+    expect(started.stderr).toBe("");
+    expect(started.answer).toMatchObject({ jsonrpc: "2.0", id: 1, result: { serverInfo: { name: "eragon-context" } } });
+  });
+
+  it.skipIf(process.platform === "win32").each([
+    ["stdin EOF", 0],
+    ["SIGTERM", 143],
+    ["Claude Code's SIGINT shutdown sequence", 130],
+    ["SIGHUP", 129],
+  ] as const)(
+    "stops the helper tree promptly on %s during startup",
+    async (shutdown, exitCode) => {
+      const dir = mkdtempSync(join(tmpdir(), "eragon-key-command-"));
+      const pidFile = join(dir, "pids");
+      // The shell stays alive as a parent because it has another command to run.
+      const command = `${node(`require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify([process.ppid, process.pid])); setTimeout(() => {}, 20000)`)}; echo esk_late`;
+      const bridge = launch(["--url", GW, "--key-command", command]);
+      const closed = once(bridge, "close");
+      let bridgeExited = false;
+      bridge.once("exit", () => { bridgeExited = true; });
+      let pids: [number, number] | undefined;
+      const running = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+          throw error;
+        }
+      };
+      try {
+        await expect.poll(() => existsSync(pidFile), { timeout: 1500 }).toBe(true);
+        pids = JSON.parse(readFileSync(pidFile, "utf8")) as [number, number];
+        const [helperPid, childPid] = pids;
+        // The client may have sent initialize already when it closes its pipe.
+        bridge.stdin.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
+        if (shutdown === "stdin EOF") {
+          bridge.stdin.end();
+        } else if (shutdown === "Claude Code's SIGINT shutdown sequence") {
+          bridge.kill("SIGINT");
+          await delay(100);
+          if (!bridgeExited) {
+            bridge.kill("SIGTERM");
+            await delay(400);
+            if (!bridgeExited) bridge.kill("SIGKILL");
+          }
+        } else {
+          bridge.kill(shutdown);
+        }
+        await expect.poll(() => ({ bridgeExited, helperRunning: running(helperPid), childRunning: running(childPid) }), {
+          timeout: 1500,
+        }).toEqual({ bridgeExited: true, helperRunning: false, childRunning: false });
+        expect(await closed).toEqual([exitCode, null]);
+      } finally {
+        if (pids !== undefined && pids.some(running)) process.kill(-pids[0], "SIGKILL");
+        if (!bridgeExited) bridge.kill("SIGKILL");
+        await closed;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

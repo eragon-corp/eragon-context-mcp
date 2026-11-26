@@ -20,8 +20,8 @@ guidance to every model call.
 
 It cannot write Team, Organization, Knowledge, or Project data. A memory reaches
 a team or the workspace only when the key owner approves a share in Eragon. It never stores
-the Gateway key in MCP configuration; the child process reads the key already
-present in the coding agent's environment.
+the Gateway key in MCP configuration. The bridge reads the key from the coding
+agent's environment or from a configured key command.
 
 ## Requirements
 
@@ -146,6 +146,32 @@ that need approval. For headless runs, approve the Eragon tools for that run:
 codex exec -c 'mcp_servers.eragon.default_tools_approval_mode="approve"' "<prompt>"
 ```
 
+## Claude Desktop with Eragon Flux
+
+Claude Code inside Claude Desktop gets its Gateway key from Desktop's
+third-party inference configuration, not from an environment variable, so the
+bridge it starts finds none and exits with `Set ERAGON_API_KEY, …`. Give the
+bridge a command that reads the key where Eragon Flux keeps it instead. On
+macOS, `eragon-flux setup --desktop` in key mode uses the login keychain when
+available. The service is `eragon-flux` and the Desktop account is
+`eragon-flux:<digest>-desktop`. The digest is the first 32 lowercase hex
+characters of the SHA-256 of the Gateway URL. Use the Desktop setup's URL
+ending in `/gw`, with a lowercase scheme and host, no default port (443 for
+HTTPS), and no trailing slash. Keep the path's original case.
+
+```sh
+gateway_url="https://<your-eragon>/gw"
+digest="$(printf '%s' "$gateway_url" | /usr/bin/shasum -a 256 | cut -c1-32)"
+account="eragon-flux:${digest}-desktop"
+eragon-context-mcp install --agent claude-code --url "$gateway_url" \
+  --key-command "/usr/bin/security find-generic-password -s eragon-flux -a $account -w"
+```
+
+The entry holds the command, never the key. If the account is missing, unlock
+the login keychain and rerun `eragon-flux setup --desktop --url "$gateway_url"`.
+Quit Claude Desktop, open it again, and start a new Code session. The key needs
+**Use my Eragon context**, or `memory_search` answers 403.
+
 ## Configuration
 
 The URL is resolved in this order:
@@ -159,6 +185,22 @@ The key is resolved in this order:
 1. `ERAGON_API_KEY`
 2. `ANTHROPIC_API_KEY`
 3. `ANTHROPIC_AUTH_TOKEN`
+4. What `--key-command` prints, or else `ERAGON_API_KEY_COMMAND`'s
+
+The key command runs only when none of the three variables is set, so an
+exported key always wins. It runs through the shell, as Claude Code runs
+`apiKeyHelper`, and must print one key within 15 seconds. The bridge stops the
+command and its children at the deadline or when the MCP client closes stdin
+during startup. On macOS and Linux, `SIGINT`, `SIGHUP`, and `SIGTERM` also stop
+the command during startup and exit with status 130, 129, and 143, respectively.
+For a manual startup check, keep stdin open until the bridge answers
+`initialize`. If stdin closes during key lookup, the bridge exits with status 0
+before answering.
+
+The bridge never logs what the key command printed. On Windows, `install`
+refuses a key command with `%`, double quotes or line breaks because cmd.exe
+would change it. Put such a command in a script. `install --key-command`
+writes the command and its Gateway URL into each agent's entry.
 
 When `ANTHROPIC_BASE_URL` is set, the bridge refuses to start if
 `ERAGON_API_KEY` differs from the key Claude Code sends (`ANTHROPIC_API_KEY`,

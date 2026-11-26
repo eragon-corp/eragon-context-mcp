@@ -185,6 +185,9 @@ export async function callMemoryTool(
     return errorResult(`Unknown Eragon Memory tool: ${name}`);
   }
 
+  const reportError = (message: string) => errorResult(
+    config.token === "" ? message : message.replaceAll(config.token, "[redacted]"),
+  );
   try {
     const response = await requestGateway({
       gatewayUrl: config.gatewayUrl,
@@ -194,11 +197,11 @@ export async function callMemoryTool(
       ...(config.fetchImpl === undefined ? {} : { fetchImpl: config.fetchImpl }),
     });
     if (response.status >= 400) {
-      return errorResult(gatewayErrorMessage(response.body, response.status));
+      return reportError(gatewayErrorMessage(response.body, response.status));
     }
     if (name === "memory_share") return shareResult(response.body, config.gatewayUrl);
     return textResult(response.body);
   } catch (error) {
-    return errorResult(error instanceof Error ? error.message : String(error));
+    return reportError(error instanceof Error ? error.message : String(error));
   }
 }
